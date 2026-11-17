@@ -1,0 +1,19 @@
+{
+  "name": "agent-huddle",
+  "version": "0.1.0",
+  "description": "A little always-on-top huddle of buddies showing what your Claude Code agents are doing.",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "demo": "node scripts/demo.js",
+    "install-hooks": "node scripts/install-hooks.js",
+    "uninstall-hooks": "node scripts/install-hooks.js --uninstall"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "electron": "^45.3.3",
+    "koffi": "^3.3.8"
+  }
+}

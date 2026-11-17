@@ -1,0 +1,14 @@
+{
+  "name": "agent-huddle",
+  "owner": {
+    "name": "Jepsterrr"
+  },
+  "description": "Agent Huddle as a Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "agent-huddle",
+      "source": "./",
+      "description": "Always-on-top box with one buddy per Claude Code session, risk-labelled permission prompts and quota at a glance. Windows."
+    }
+  ]
+}

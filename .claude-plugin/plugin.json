@@ -1,0 +1,11 @@
+{
+  "name": "agent-huddle",
+  "displayName": "Agent Huddle",
+  "version": "0.1.0",
+  "description": "A small always-on-top box with one buddy per Claude Code session: what each agent is doing, risk-labelled permission prompts you can answer in place, and your quota at a glance. Windows.",
+  "author": {
+    "name": "Jepsterrr"
+  },
+  "license": "MIT",
+  "keywords": ["sessions", "permissions", "dashboard", "windows", "electron", "quota"]
+}

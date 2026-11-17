@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+  <title>Agent Huddle</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="root" data-h="right" data-v="top">
+    <section id="widget" data-hit>
+      <header id="bar" title="Drag to move">
+        <span class="dot" id="dot"></span>
+        <span class="brand">Agent Huddle</span>
+        <span class="count" id="count"></span>
+        <span class="minis" id="minis"></span>
+        <button class="icon" id="b-sound" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M3 8v4h3l4 3.500V4.500L6 8z"/>
+            <path class="waves" d="M13 7.500a3.500 3.500 0 0 1 0 5M15.200 5.300a6.600 6.600 0 0 1 0 9.400"/>
+            <path class="muted" d="m13.500 8 4 4m0-4-4 4"/>
+          </svg>
+        </button>
+        <button class="icon" id="b-settings" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.650 1.650 0 0 0 .33 1.820l.06.06a2 2 0 0 1 0 2.830 2 2 0 0 1-2.830 0l-.06-.06a1.650 1.650 0 0 0-1.820-.33 1.650 1.650 0 0 0-1 1.510V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.650 1.650 0 0 0 9 19.400a1.650 1.650 0 0 0-1.820.33l-.06.06a2 2 0 0 1-2.830 0 2 2 0 0 1 0-2.830l.06-.06a1.650 1.650 0 0 0 .33-1.820 1.650 1.650 0 0 0-1.510-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.650 1.650 0 0 0 4.600 9a1.650 1.650 0 0 0-.33-1.820l-.06-.06a2 2 0 0 1 0-2.830 2 2 0 0 1 2.830 0l.06.06a1.650 1.650 0 0 0 1.820.33H9a1.650 1.650 0 0 0 1-1.510V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.650 1.650 0 0 0 1 1.510 1.650 1.650 0 0 0 1.820-.33l.06-.06a2 2 0 0 1 2.830 0 2 2 0 0 1 0 2.830l-.06.06a1.650 1.650 0 0 0-.33 1.820V9a1.650 1.650 0 0 0 1.510 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.650 1.650 0 0 0-1.510 1z"/></svg>
+        </button>
+        <button class="icon" id="b-collapse" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 12.500 5-5 5 5"/></svg>
+        </button>
+        <button class="icon" id="b-hide" type="button" title="Minimise to the tray" aria-label="Minimise to the tray">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
+        </button>
+      </header>
+      <div id="usage" hidden></div>
+      <ul id="list"></ul>
+      <section id="settings" aria-label="Settings" hidden></section>
+    </section>
+  </div>
+  <script src="markdown.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
