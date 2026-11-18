@@ -35,6 +35,18 @@ function builderEnv(env = process.env) {
   return out;
 }
 
+// A plan with no file of its own (one from plan mode) is written to
+// <dir>/plans/ first, so the builder's command line carries a path and not the
+// whole text: Windows cuts a command line at about 32,000 characters.
+function writePlanFile(dir, plan, now = Date.now()) {
+  const slug = String(plan?.title || 'plan').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'plan';
+  const folder = path.join(dir, 'plans');
+  fs.mkdirSync(folder, { recursive: true });
+  const file = path.join(folder, `${slug}-${now}.md`);
+  fs.writeFileSync(file, String(plan?.text || ''));
+  return file;
+}
+
 // "build: retry-logic", kept short for `claude agents` and the card.
 const builderName = (title) => `build: ${String(title || 'plan').slice(0, 40)}`;
 
@@ -94,6 +106,7 @@ function reportPrompt(title, builderMessage) {
 module.exports = {
   findClaude,
   builderEnv,
+  writePlanFile,
   builderName,
   builderArgs,
   builderPrompt,

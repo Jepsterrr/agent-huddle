@@ -384,9 +384,10 @@ class Store extends EventEmitter {
 
   // ---- background builders (builder.js; started by the app) ----
 
-  planPromptFor(plannerId) {
+  // `file`: where the plan's text was written, for a plan that has no file.
+  planPromptFor(plannerId, file) {
     const s = this.sessions.get(plannerId);
-    return s?.plan ? planPrompt(s) : null;
+    return s?.plan ? planPrompt(s, file) : null;
   }
 
   // Builds that are starting or running, everywhere.
@@ -882,11 +883,12 @@ function systemNotice(prompt) {
 
 // What the receiving session is asked. Worded so that a session with
 // superpowers picks up its plan-execution skills by itself.
-function planPrompt(from) {
+function planPrompt(from, file) {
   const who = from.title || from.name;
   const p = from.plan;
-  if (p.path) {
-    return `Here is an implementation plan written in another session (${who}): ${p.path}\n\nRead it and carry it out task by task, checking your work as you go.`;
+  const at = p.path || file;
+  if (at) {
+    return `Here is an implementation plan written in another session (${who}): ${at}\n\nRead it and carry it out task by task, checking your work as you go.`;
   }
   return `Here is an implementation plan written in another session (${who}):\n\n${p.text}\n\nCarry it out task by task, checking your work as you go.`;
 }

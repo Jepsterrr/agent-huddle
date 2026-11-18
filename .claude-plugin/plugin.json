@@ -1,8 +1,8 @@
 {
   "name": "agent-huddle",
   "displayName": "Agent Huddle",
-  "version": "0.2.0",
-  "description": "A small always-on-top box with one buddy per Claude Code session: what each agent and its subagents are doing, risk-labelled permission prompts you can answer in place, your quota at a glance, and plans built in the background. Windows.",
+  "version": "0.2.1",
+  "description": "A small always-on-top box with one buddy per Claude Code session: what each agent and its subagents are doing, risk-labelled permission prompts you can answer in place, your quota at a glance, and plans built in the background. Its module can submit a plan you send from one session's card as a prompt in another session. Windows.",
   "author": {
     "name": "Jepsterrr"
   },

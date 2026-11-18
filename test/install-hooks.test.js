@@ -46,6 +46,10 @@ test('install: exec-form hooks, questions on PermissionRequest, status line brid
   const again = run().settings;
   assert.deepEqual(again, settings);
 
+  // The backup still holds the original, without Huddle's hooks.
+  const backup = JSON.parse(fs.readFileSync(`${file}.huddle-backup`, 'utf8'));
+  assert.deepEqual(backup, { model: 'opus', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'mine.exe' }] }] } });
+
   // Uninstall removes our hooks and our status line, and keeps the rest.
   const gone = run('--uninstall').settings;
   assert.equal(gone.statusLine, undefined);

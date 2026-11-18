@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.1
+
+**Requirements**
+- Node.js 22.12 or later (was 18), which Electron's installer already needed. Node 18 and 20 are out of support. CI now tests on the oldest allowed Node and on a current one.
+
+**Fixes**
+- `install-hooks` no longer overwrites `settings.json.huddle-backup` on every run: the first run's backup of the original is kept, so a second run cannot replace it with a copy that already has Huddle's hooks.
+- A plan with no file of its own (plan mode) is saved to `~/.agent-huddle/plans/` and the builder gets its path, instead of the whole text on the command line, which Windows cuts at about 32,000 characters.
+- The hook no longer trusts a `runtime.json` left by an app that crashed: unless its pid is alive, nothing is sent, so another program that happens to get the same port never receives the token or a permission request.
+- A Write's diff no longer shows a secret file reached through a symlink or a folder junction: the link's target is checked, not only its name.
+
+**Risk labels**
+- Deleting only build output inside the project (`rm -rf node_modules`, `dist`, `build`, `.next` …) is medium (`deletes build output`), not high. Anything more in the same line, a `cd`, a wildcard, a variable or a path outside the project keeps it high.
+- `sed -i` is checked like other writes: outside the project or into a secrets file is high.
+- A shell call with no command is medium (`no command to judge`) instead of a silent low.
+- Writing `.claude/settings.json` gives one reason (`changes Claude settings`) instead of overlapping ones.
+
+**Plugin**
+- The plugin and hook descriptions now say that the module submits a plan you send from another session's card as a prompt in that session.
+- The module's decisions (which subagent gets which model, what goes to the app, what counts as a plan in the inbox) moved to `hooks/mod-logic.mjs`, and are now tested by running them, as is the module's `register()` with a stand-in for Claude Code. Before, the tests only read the module's source.
+- The inbox timer is cancelled at the end of a session and never doubled if a session starts twice in one process.
+
 ## 0.2.0
 
 **Subagents**

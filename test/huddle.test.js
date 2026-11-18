@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const { Store } = require('../src/store');
 const { startServer } = require('../src/server');
@@ -274,6 +274,26 @@ test('hook script: silent and exit 0 when the app is not running', async () => {
   // Stale runtime file pointing at a dead port.
   fs.writeFileSync(path.join(home, 'runtime.json'), JSON.stringify({ port: 9, token: 'x' }));
   assert.deepEqual(await runHook(home, ev('PermissionRequest'), true), { code: 0, out: '' });
+});
+
+test('hook script: a runtime file whose app is gone gets nothing, even if its port answers', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'huddle-'));
+  let seen = 0;
+  const server = await startServer({ token: 'secret', onEvent: () => (seen++, null) });
+  // The pid of a process that has just exited stands for an app that crashed.
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  try {
+    fs.writeFileSync(path.join(home, 'runtime.json'), JSON.stringify({ port: server.address().port, token: 'secret', pid: dead }));
+    assert.deepEqual(await runHook(home, ev('PermissionRequest'), true), { code: 0, out: '' });
+    assert.equal(seen, 0);
+    // The same file with a live pid is used.
+    fs.writeFileSync(path.join(home, 'runtime.json'), JSON.stringify({ port: server.address().port, token: 'secret', pid: process.pid }));
+    await runHook(home, ev('UserPromptSubmit', { prompt: 'hi' }));
+    assert.equal(seen, 1);
+  } finally {
+    server.close();
+    server.closeAllConnections();
+  }
 });
 
 test('hook script: end to end through the server', async () => {

@@ -2,8 +2,10 @@
 // plugin module; an editor opening this repository does not have them, so it
 // may show type errors here. Check the module with `claude plugin validate .`
 import type { EngineInterface, Register } from 'claude-code'
+import { chooseModel, inboxMessage, parseRouting, parseRuntime, statusEvent } from './mod-logic.mjs'
+import type { Runtime } from './mod-logic.mjs'
 
-// Agent Huddle's plugin module. Two small jobs, both local:
+// Agent Huddle's plugin module. Three small jobs, all local:
 //
 // 1. Quota and cost. Claude Code hands a plugin module the figures it gives a
 //    statusLine command (`session.measure`, after each turn and when a quota
@@ -25,22 +27,9 @@ import type { EngineInterface, Register } from 'claude-code'
 //    reports back so the sending card can say it arrived. Nothing is ever
 //    submitted that you did not send from the huddle yourself.
 //
-// When the app is not running there is no runtime file and nothing is sent.
-
-type Window = { used_percentage: number; resets_at?: number }
-type Runtime = { port: number; token: string }
-type Family = { name: string; pattern: string; model: string | null }
-type Routing = { enabled: boolean; families: Family[] }
-
-const MODELS = ['sonnet', 'opus', 'haiku', 'fable'] as const
-// Built-in subagent types whose model comes from no definition of their own
-// (forks always inherit the parent's model, so they are not here).
-const BUILTIN_AGENTS: readonly string[] = ['general-purpose', 'Explore', 'Plan']
-type Model = (typeof MODELS)[number]
-
-function isModel(m: unknown): m is Model {
-  return typeof m === 'string' && (MODELS as readonly string[]).includes(m)
-}
+// What each job decides is in mod-logic.mjs (tested in test/mod.test.js);
+// this file only reads, fetches and submits. When the app is not running
+// there is no runtime file and nothing is sent.
 
 // Huddle's folder: HUDDLE_HOME, else ~/.agent-huddle.
 async function huddleHome($: EngineInterface): Promise<string> {
@@ -50,15 +39,22 @@ async function huddleHome($: EngineInterface): Promise<string> {
   )
 }
 
+// The running app's port and token. Rejects when the app is not running.
+async function readRuntime($: EngineInterface): Promise<Runtime> {
+  const runtime = parseRuntime(await $.fs.read(`${await huddleHome($)}/runtime.json`))
+  if (!runtime) throw new Error('no usable runtime.json')
+  return runtime
+}
+
 // Posts one event to the running app. Rejects when the app is not running.
-async function sendToHuddle($: EngineInterface, body: object): Promise<void> {
-  const runtime = JSON.parse(await $.fs.read(`${await huddleHome($)}/runtime.json`)) as Runtime
-  await $.http.fetch(`http://127.0.0.1:${runtime.port}/event`, {
+async function postEvent($: EngineInterface, mode: 'notify' | 'wait', body: object) {
+  const runtime = await readRuntime($)
+  return $.http.fetch(`http://127.0.0.1:${runtime.port}/event`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       'x-huddle-token': runtime.token,
-      'x-huddle-mode': 'notify',
+      'x-huddle-mode': mode, // 'wait': the reply carries what is waiting, if anything
     },
     body: JSON.stringify({ session_id: await $.session.id(), ...body }),
   })
@@ -66,44 +62,25 @@ async function sendToHuddle($: EngineInterface, body: object): Promise<void> {
 
 const INBOX_EVERY_MS = 3000
 let collecting = false // one inbox check at a time
+let inboxTimer: { cancel: () => void } | undefined
 
 // Collects a plan sent to this session from the huddle, and submits it.
 async function collectInbox($: EngineInterface): Promise<void> {
   if (collecting) return
   collecting = true
   try {
-    const runtime = JSON.parse(await $.fs.read(`${await huddleHome($)}/runtime.json`)) as Runtime
-    const res = await $.http.fetch(`http://127.0.0.1:${runtime.port}/event`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-huddle-token': runtime.token,
-        'x-huddle-mode': 'wait', // the reply carries what is waiting, if anything
-      },
-      body: JSON.stringify({ session_id: await $.session.id(), hook_event_name: 'Inbox' }),
-    })
-    if (res.status !== 200) return // 204: nothing waiting
-    const msg = (JSON.parse(res.text) as { huddle?: { submit?: string; fromId?: string } }).huddle
-    if (!msg?.submit) return
+    const res = await postEvent($, 'wait', { hook_event_name: 'Inbox' })
+    const msg = inboxMessage(res.status, res.text)
+    if (!msg) return
     let ok = true
     try {
       await $.prompt.submit({ text: msg.submit })
     } catch {
       ok = false
     }
-    await sendToHuddle($, { hook_event_name: 'Delivered', from_id: msg.fromId, ok })
+    await postEvent($, 'notify', { hook_event_name: 'Delivered', from_id: msg.fromId, ok })
   } finally {
     collecting = false
-  }
-}
-
-// The rules, or null when there are none to apply.
-async function readRouting($: EngineInterface): Promise<Routing | null> {
-  try {
-    const routing = JSON.parse(await $.fs.read(`${await huddleHome($)}/routing.json`)) as Routing
-    return routing?.enabled && Array.isArray(routing.families) ? routing : null
-  } catch {
-    return null
   }
 }
 
@@ -113,18 +90,7 @@ export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
     try {
-      const windows: Record<string, Window> = {}
-      for (const w of e.rateLimits) {
-        const at = w.resetsAt ? Date.parse(w.resetsAt) / 1000 : NaN
-        windows[w.kind] = { used_percentage: w.percentUsed, resets_at: Number.isFinite(at) ? at : undefined }
-      }
-      await sendToHuddle($, {
-        hook_event_name: 'StatusLine',
-        source: 'mod',
-        cost_usd: e.cost?.usd,
-        context_pct: e.context.percent,
-        rate_limits: e.rateLimits.length ? windows : undefined,
-      })
+      await postEvent($, 'notify', statusEvent(e))
     } catch {
       // The app is not running, or not reachable: Huddle is never in the way.
     }
@@ -132,31 +98,44 @@ export const register: Register = on => {
   })
 
   // ---- 3. plans between sessions: check the inbox while the session lives ----
+  //
+  // session.start fires once per session (a /clear keeps the process and its
+  // timer, under a new session id), and a module reload cancels the timer
+  // itself. The old timer is still cancelled first, so there is never more
+  // than one, whatever the engine does.
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    $.clock.every(INBOX_EVERY_MS, () => {
+    inboxTimer?.cancel()
+    inboxTimer = $.clock.every(INBOX_EVERY_MS, () => {
       collectInbox($).catch(() => {}) // the app is not running: try again later
     })
     return result
   })
 
+  on('session.end', async ($, e, next) => {
+    if (e.reason !== 'clear') {
+      inboxTimer?.cancel()
+      inboxTimer = undefined
+    }
+    return next(e)
+  })
+
   // ---- 2. subagent models ----
 
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
-    if (e.model) return next(e) // the agent chose: leave it
-    // Only Claude Code's built-in subagents. A custom or plugin agent may set
-    // its model in its definition, and a model here would override that.
-    if (e.subagent_type && !BUILTIN_AGENTS.includes(e.subagent_type)) return next(e)
-    const routing = await readRouting($)
-    if (!routing) return next(e)
-
-    const text = `${e.description ?? ''} ${e.subagent_type ?? ''}`
-    const family = routing.families.find(f => new RegExp(f.pattern, 'i').test(text))
-    if (!family || !isModel(family.model)) return next(e)
+    if (e.model) return next(e) // the agent chose: leave it (before any file is read)
+    let routing = null
+    try {
+      routing = parseRouting(await $.fs.read(`${await huddleHome($)}/routing.json`))
+    } catch {
+      // no rules file: nothing to apply
+    }
+    const choice = chooseModel(routing, e)
+    if (!choice) return next(e)
 
     // Tell the huddle a rule chose this model, for the team view. Best effort.
-    sendToHuddle($, { hook_event_name: 'Routed', tool_use_id: e.tool_use_id, family: family.name, model: family.model }).catch(() => {})
-    return next({ ...e, model: family.model })
+    postEvent($, 'notify', { hook_event_name: 'Routed', tool_use_id: e.tool_use_id, ...choice }).catch(() => {})
+    return next({ ...e, model: choice.model })
   }).catch(($, e, next) => next(e)) // a rule that fails changes nothing
 }

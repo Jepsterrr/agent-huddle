@@ -13,13 +13,15 @@
 //   - what a script, `npm run x`, `make`, `python -c`, a git alias or a hook does
 //   - a `cd` to a variable or `cd -`: relative paths after it are not judged
 //   - symlinks and junctions that point out of the project
-//   - writes by commands other than delete/copy/move/tee, `>` / `>>` and
-//     Out-File/Set-Content/Add-Content (e.g. `sed -i`, `New-Item`, `git -C`,
-//     `tar -C`, a program's own output flag like `-o C:\x`)
+//   - writes by commands other than delete/copy/move/tee/`sed -i`, `>` / `>>`
+//     and Out-File/Set-Content/Add-Content (e.g. `perl -i`, `New-Item`,
+//     `git -C`, `tar -C`, a program's own output flag like `-o C:\x`)
 //   - environment variables in paths other than the home directory
 //   - a single `&` (background job in bash, call operator in PowerShell) is
 //     not treated as a separator
 //   - what an MCP tool actually does (they are all "medium: unknown effect")
+// Deleting only build output inside the project (node_modules, dist, build…)
+// is "medium", not "high": it is routine, and a build or install makes it again.
 // "Outside the project" means outside the session's cwd; folders added with
 // /add-dir are not known here and also count as outside.
 
@@ -284,18 +286,86 @@ function assessPaths(c, ctx, add) {
       }
     } else if (name === 'tee') {
       for (const t of pathArgs(args).paths) check(t, 'writes');
+    } else if (name === 'sed') {
+      for (const t of sedInPlaceFiles(args)) check(t, 'writes');
     }
 
     for (const t of redirectTargets(raw)) check(t, 'writes');
   }
 }
 
+// The files `sed -i` rewrites: the arguments left after the flags and the
+// script. [] when sed does not edit in place.
+function sedInPlaceFiles(args) {
+  let inPlace = false;
+  let scriptGiven = false;
+  const rest = [];
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') {
+      rest.push(...args.slice(i + 1));
+      break;
+    }
+    if (a === '-e' || a === '-f' || a === '--expression' || a === '--file') {
+      scriptGiven = true;
+      i++;
+    } else if (/^--(?:expression|file)=/.test(a)) {
+      scriptGiven = true;
+    } else if (/^--in-place\b/.test(a) || /^-[a-z]*i/i.test(a)) {
+      inPlace = true; // -i, -i.bak, -ni, -Ei …
+    } else if (!/^-/.test(a)) {
+      rest.push(a);
+    }
+  }
+  if (!inPlace) return [];
+  return scriptGiven ? rest : rest.slice(1);
+}
+
+// Folders a build or an install makes again.
+const BUILD_OUTPUT = new Set([
+  'node_modules', 'dist', 'build', 'out', '.next', '.nuxt', '.turbo', '.parcel-cache',
+  'coverage', 'target', '__pycache__', '.pytest_cache',
+]);
+const RECURSIVE_DELETE = COMMAND_RULES.filter(([, reason]) => reason === 'deletes recursively').map(([, , re]) => re);
+
+// True when every delete in the line is a plain delete command that removes
+// only build output inside the project, and no `cd` moves the folder first.
+// Anything else that deletes recursively (find -delete, a pipe into
+// Remove-Item, cmd /c "rd /s …") keeps the line "high".
+function onlyBuildOutput(c, ctx) {
+  const root = normPath(ctx.cwd, { home: ctx.home });
+  if (!root) return false;
+  let deletes = 0;
+  for (const { raw, args } of splitCommands(c)) {
+    const name = cmdName(args[0]);
+    if (CHDIR.has(name)) return false;
+    if (!DELETERS.has(name)) {
+      if (RECURSIVE_DELETE.some((re) => re.test(raw) || re.test(undisguise(raw)))) return false;
+      continue;
+    }
+    const { paths } = pathArgs(args);
+    if (!paths.length) return false;
+    for (const t of paths) {
+      if (unknowable(t) || /[*?]/.test(t)) return false;
+      const p = normPath(t, ctx);
+      if (p === root || !inProject(p, ctx) || !BUILD_OUTPUT.has(p.split('/').pop())) return false;
+    }
+    deletes++;
+  }
+  return deletes > 0;
+}
+
 function assessCommand(cmd, tool, ctx, add) {
   const raw = String(cmd || '');
-  if (!raw.trim()) return;
+  if (!raw.trim()) return add('medium', 'no command to judge');
   const c = blankMessages(raw);
   const plain = undisguise(c);
-  for (const [level, reason, re] of COMMAND_RULES) if (re.test(c) || re.test(plain)) add(level, reason);
+  const routine = onlyBuildOutput(c, ctx);
+  for (const [level, reason, re] of COMMAND_RULES) {
+    if (!re.test(c) && !re.test(plain)) continue;
+    if (routine && reason === 'deletes recursively') add('medium', 'deletes build output');
+    else add(level, reason);
+  }
   for (const [kind, re] of SECRET_IN_COMMAND) if (re.test(c)) add('high', `touches ${kind}`);
   assessPaths(c, ctx, add);
 
@@ -317,7 +387,8 @@ function assessCommand(cmd, tool, ctx, add) {
 
 // A weaker reason says nothing new next to these stronger ones.
 const SUPERSEDED = {
-  'deletes files': ['deletes recursively', 'deletes untracked files', 'deletes outside the project'],
+  'deletes files': ['deletes recursively', 'deletes untracked files', 'deletes outside the project', 'deletes build output'],
+  'changes Claude config': ['changes Claude settings'],
   'pushes to a remote': ['force-pushes'],
   'uses the network': ['runs code from the internet'],
   'runs code built from text': ['runs code from the internet'],

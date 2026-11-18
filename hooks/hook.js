@@ -117,6 +117,20 @@ function setupNotice() {
   });
 }
 
+// Does the runtime file belong to an app that is still running? Its pid must
+// be alive. A file without a pid (written before it was added) is trusted.
+function appAlive(runtime) {
+  if (!runtime || !Number.isInteger(runtime.port) || typeof runtime.token !== 'string') return false;
+  if (runtime.pid == null) return true;
+  if (!Number.isInteger(runtime.pid) || runtime.pid <= 0) return false;
+  try {
+    process.kill(runtime.pid, 0); // signal 0 only checks that the process exists
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
 // The app could not be reached.
 function unreachable(body) {
   if (mode === 'status') return quit();
@@ -164,6 +178,9 @@ process.stdin.on('end', () => {
   } catch {
     return unreachable(body);
   }
+  // A runtime file left by an app that crashed: its port may now belong to
+  // another program, which must not be sent the token or a permission request.
+  if (!appAlive(runtime)) return unreachable(body);
 
   const req = http.request(
     {

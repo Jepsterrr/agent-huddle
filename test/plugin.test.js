@@ -51,20 +51,16 @@ test('the plugin manifest, marketplace and hooks agree with install-hooks', () =
   assert.ok(fs.existsSync(path.join(ROOT, 'hooks', 'huddle-mod.ts')));
 });
 
-test('the plugin module sends what the statusLine bridge sends, to 127.0.0.1 only', () => {
-  const src = fs.readFileSync(path.join(ROOT, 'hooks', 'huddle-mod.ts'), 'utf8');
-  assert.match(src, /on\('session\.measure'/);
-  // Same event name, mode and fields as hook.js's statusBody().
-  for (const field of ["hook_event_name: 'StatusLine'", 'session_id:', 'cost_usd:', 'context_pct:', 'rate_limits:', 'used_percentage', 'resets_at']) {
-    assert.ok(src.includes(field), `huddle-mod.ts lacks ${field}`);
-  }
-  // Sent as plain events; the store knows StatusLine by its name, whatever the mode.
-  assert.ok(src.includes("'x-huddle-mode': 'notify'") && src.includes("'x-huddle-token': runtime.token"));
-  // The only address it talks to.
+// What the module does is run for real in mod.test.js; what it can never do
+// is read here from its source (the module and the file it imports).
+test('the plugin module talks to 127.0.0.1 only and never writes, sets or runs anything', () => {
+  const src = ['huddle-mod.ts', 'mod-logic.mjs'].map((f) => fs.readFileSync(path.join(ROOT, 'hooks', f), 'utf8')).join('\n');
   const urls = src.match(/https?:\/\/[^`'"]+/g) || [];
   assert.deepEqual([...new Set(urls)], ['http://127.0.0.1:${runtime.port}/event']);
-  // It never writes anything.
-  assert.ok(!/\$\.fs\.write|\$\.env\.set|\$\.process/.test(src));
+  assert.ok(!/\$\.fs\.write|\$\.env\.set|\$\.process|\$\.agent|\$\.command/.test(src));
+  // Its only imports: the types, and its own logic file.
+  const imports = [...src.matchAll(/^import .* from '([^']+)'/gm)].map((m) => m[1]);
+  assert.deepEqual([...new Set(imports)], ['claude-code', './mod-logic.mjs']);
 });
 
 test('Huddle hooks are recognised in any folder name, nothing else is', () => {

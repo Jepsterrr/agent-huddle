@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Adds (or with --uninstall, removes) the Agent Huddle hooks in the user-level
 // Claude Code settings. Existing settings and other hooks are left alone, and a
-// backup of the file is written first.
+// backup of the original file is written the first time (and then kept).
 //
 //   --uninstall       remove Huddle's hooks and status line
 //   --no-statusline   leave the status line out (and remove ours)
@@ -28,9 +28,16 @@ if (fs.existsSync(settingsFile)) {
     console.error(`Could not parse ${settingsFile}: ${err.message}\nNothing was changed.`);
     process.exit(1);
   }
+  // Written once, before Huddle first touches the file, and never overwritten:
+  // a second run would otherwise replace the original with a copy that
+  // already has Huddle's hooks in it.
   const backup = `${settingsFile}.huddle-backup`;
-  fs.writeFileSync(backup, raw);
-  console.log(`Backup written to ${backup}`);
+  if (fs.existsSync(backup)) {
+    console.log(`Backup kept from an earlier run: ${backup}`);
+  } else {
+    fs.writeFileSync(backup, raw, { flag: 'wx' });
+    console.log(`Backup written to ${backup}`);
+  }
 } else {
   fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
 }

@@ -12,13 +12,13 @@ function expect(result, level, reason) {
 }
 
 test('high: destructive commands', () => {
-  for (const c of ['rm -rf node_modules', 'rm -fr dist', 'rm -r -f build', 'rm --recursive x', 'sudo rm -Rf /']) {
+  for (const c of ['rm -rf src', 'rm -fr lib', 'rm -r -f docs', 'rm --recursive x', 'sudo rm -Rf /']) {
     expect(bash(c), 'high', 'deletes recursively');
   }
-  expect(bash('del /s /q build'), 'high', 'deletes recursively');
-  expect(bash('rmdir /S /Q dist'), 'high', 'deletes recursively');
-  expect(ps('Remove-Item -Recurse -Force .\\dist'), 'high', 'deletes recursively');
-  expect(ps('rm -r -fo dist'), 'high', 'deletes recursively');
+  expect(bash('del /s /q src'), 'high', 'deletes recursively');
+  expect(bash('rmdir /S /Q src'), 'high', 'deletes recursively');
+  expect(ps('Remove-Item -Recurse -Force .\\src'), 'high', 'deletes recursively');
+  expect(ps('rm -r -fo src'), 'high', 'deletes recursively');
   expect(bash('find . -name "*.log" -delete'), 'high', 'deletes recursively');
   expect(bash('git push --force origin main'), 'high', 'force-pushes');
   expect(bash('git push -f'), 'high', 'force-pushes');
@@ -209,8 +209,6 @@ test('low: reads, searches, plain commands; quoted separators are not chains', (
   expect(assess('Grep', { pattern: 'TODO', path: 'src' }, CTX), 'low');
   expect(assess('Glob', { pattern: '**/*.js' }, CTX), 'low');
   expect(assess('Agent', { prompt: 'x' }, CTX), 'low');
-  expect(assess('Bash', {}, CTX), 'low');
-  expect(assess('Bash', null, CTX), 'low');
 });
 
 test('cheap disguises are seen through', () => {
@@ -230,13 +228,52 @@ test('known blind spots (documented in risk.js): these are NOT caught as high', 
   // What a script does is unknown.
   expect(bash('npm run clean'), 'low');
   expect(bash('./deploy.sh'), 'low');
-  // Writes through commands other than delete/copy/move/tee/redirects are not checked.
-  expect(bash('sed -i s/a/b/ C:/Windows/x.ini'), 'low');
+  // Writes through commands other than delete/copy/move/tee/sed -i/redirects are not checked.
   expect(bash('tar -xf a.tar -C C:/Windows'), 'low');
 });
 
+test('deleting build output inside the project is medium, not high', () => {
+  for (const c of ['rm -rf node_modules', 'rm -fr dist', 'rm -r -f build', 'rm -rf node_modules dist/', 'rm -rf web/.next']) {
+    expect(bash(c), 'medium', 'deletes build output');
+    assert.ok(!bash(c).reasons.includes('deletes files'));
+  }
+  expect(bash('rmdir /S /Q dist'), 'medium', 'deletes build output');
+  expect(ps('Remove-Item -Recurse -Force .\\node_modules'), 'medium', 'deletes build output');
+  expect(bash('rm -rf node_modules && npm install'), 'medium');
+  // Anything more stays high.
+  expect(bash('rm -rf node_modules src'), 'high', 'deletes recursively');
+  expect(bash('rm -rf ../other/node_modules'), 'high', 'deletes outside the project');
+  expect(bash('rm -rf node_modules/../src'), 'high', 'deletes recursively');
+  expect(bash('rm -rf */dist'), 'high', 'deletes recursively');
+  expect(bash('rm -rf $DIR/dist'), 'high', 'deletes recursively');
+  expect(bash('cd .. && rm -rf dist'), 'high', 'deletes recursively');
+  expect(bash('rm -rf dist; find . -name x -delete'), 'high', 'deletes recursively');
+  expect(bash('cmd /c "rd /s /q dist"'), 'high', 'deletes recursively');
+});
+
+test('sed -i writes are checked like other writes', () => {
+  expect(bash('sed -i s/a/b/ ../other/file.txt'), 'high', 'writes outside the project');
+  expect(bash('sed -i.bak -e s/a/b/ C:/Windows/x.ini'), 'high', 'writes outside the project');
+  expect(bash("sed -i 's/a/b/' .env"), 'high', 'writes .env secrets');
+  expect(bash("sed -i 's/a/b/' src/app.js"), 'low');
+  expect(bash("sed 's/a/b/' ../other/file.txt"), 'low'); // prints only
+});
+
+test('a shell call with no command is not silently low', () => {
+  expect(bash(''), 'medium', 'no command to judge');
+  expect(assess('Bash', {}, CTX), 'medium', 'no command to judge');
+  expect(assess('Bash', null, CTX), 'medium', 'no command to judge');
+});
+
+test('writing Claude settings gives one reason for it, not several', () => {
+  const r = assess('Write', { file_path: 'C:\\Users\\Me\\My Projects\\app\\.claude\\settings.json' }, CTX);
+  assert.deepEqual(r, { level: 'high', reasons: ['changes Claude settings'] });
+  const home = assess('Edit', { file_path: 'C:\\Users\\Me\\.claude\\settings.json' }, CTX);
+  assert.deepEqual(home.reasons, ['changes Claude settings', 'writes outside the project']);
+});
+
 test('the most serious reasons come first', () => {
-  const r = bash('npm install && rm -rf dist');
+  const r = bash('npm install && rm -rf src');
   assert.equal(r.level, 'high');
   assert.equal(r.reasons[0], 'deletes recursively');
   // ...and a weaker reason that says the same thing is left out.

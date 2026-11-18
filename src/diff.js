@@ -1,5 +1,6 @@
 // A compact line diff for permission cards. No Electron, no dependencies.
 
+const fs = require('fs');
 const { secretKind } = require('./risk');
 
 const MAX_CELLS = 2_000_000; // LCS table size limit; beyond it, show "all removed / all added"
@@ -129,4 +130,26 @@ function diffForTool(tool, input, readFile) {
   return summarise(lineDiff(before, input.content).map(clipLine));
 }
 
-module.exports = { lineDiff, compact, diffForTool, MAX_FILE };
+// The file on disk that a Write would replace, for its diff: its text, null
+// when it does not exist yet, undefined when it is not shown (too big, not a
+// file, unreadable, or a secret). The secret check on the name is not enough
+// for a link: a harmless-looking file, or one in a junctioned folder, can point
+// at a secret one, so the link's target is checked too.
+function readForDiff(file) {
+  let real;
+  let st;
+  try {
+    real = fs.realpathSync(file);
+    st = fs.statSync(real);
+  } catch (err) {
+    return err.code === 'ENOENT' ? null : undefined;
+  }
+  if (secretKind(real) || !st.isFile() || st.size > MAX_FILE) return undefined;
+  try {
+    return fs.readFileSync(real, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+module.exports = { lineDiff, compact, diffForTool, readForDiff, MAX_FILE };

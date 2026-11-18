@@ -66,3 +66,43 @@ test('secret files never show their contents, and are never read', () => {
   const e = diffForTool('Edit', { file_path: 'C:\\Users\\me\\.ssh\\config', old_string: 'a', new_string: 'b' });
   assert.equal(e.hidden, true);
 });
+
+test('readForDiff: plain files are read, a link to a secret file is not', (t) => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { readForDiff } = require('../src/diff');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'huddle diff '));
+  const plain = path.join(dir, 'a.txt');
+  fs.writeFileSync(plain, 'hello');
+  assert.equal(readForDiff(plain), 'hello');
+  assert.equal(readForDiff(path.join(dir, 'new.txt')), null); // a new file
+  assert.equal(readForDiff(dir), undefined); // not a file
+
+  const secret = path.join(dir, '.env');
+  fs.writeFileSync(secret, 'TOKEN=x');
+  const link = path.join(dir, 'notes.txt');
+  try {
+    fs.symlinkSync(secret, link, 'file');
+  } catch (err) {
+    return t.skip(`cannot make a symlink here (${err.code}); Windows needs Developer Mode`);
+  }
+  assert.equal(readForDiff(link), undefined);
+});
+
+test('readForDiff: a file reached through a folder junction to a secret folder is not read', (t) => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { readForDiff } = require('../src/diff');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'huddle diff '));
+  fs.mkdirSync(path.join(dir, '.ssh'));
+  fs.writeFileSync(path.join(dir, '.ssh', 'config'), 'Host x');
+  const keys = path.join(dir, 'keys'); // "keys/config": nothing secret in the name
+  try {
+    fs.symlinkSync(path.join(dir, '.ssh'), keys, 'junction');
+  } catch (err) {
+    return t.skip(`cannot make a junction or link here (${err.code})`);
+  }
+  assert.equal(readForDiff(path.join(keys, 'config')), undefined);
+});

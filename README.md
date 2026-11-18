@@ -13,9 +13,11 @@ A small always-on-top box where every Claude Code agent gets its own buddy, so y
   - One builder at a time; the automatic start waits when a quota is at 90 %. `Stop` on the planner's card ends the builder (`claude stop`).
   - Only a plan saved in a `plans` folder starts a builder by itself, and only when its session did not go on to carry it out (change files, or start subagents that build). A plan from plan mode (which its own session carries out once you approve it), or a file that only has "plan" in its name, gets `Build` on its card instead.
   - `Send to…` hands the plan to another open session with the plugin instead, as a prompt there.
+  - A plan becomes the builder's instructions. The builder runs in `default` permission mode, so every change it makes still asks you first, but think twice about `Build plans automatically` when the planning agent has read content you do not trust (web pages, issues, other people's files) before it wrote the plan.
+  - A plan from plan mode has no file of its own; it is saved to `~/.agent-huddle/plans/` and the builder is given that path, so a long plan does not run into Windows' limit on command-line length.
 - **Subagent models (plugin, off by default):** turn on `Choose subagent models` in Settings and pick a model per role (Explore & search, Plan, Implement, Test, Review) by clicking it. It only applies to Claude Code's built-in subagents (general-purpose, Explore, Plan) when the agent gives them no model itself; the agent's own choice always wins, and custom or plugin agents keep the model their own definition sets. The team list marks a model a rule chose with `(rule)`. The roles are the ones the team list shows, so a rule hits exactly what you see there.
 - **Permissions:** `Allow`, `Always`, `Deny` or `In VS Code` (`In terminal` when the agent runs in one) appear right in the card, compactly: the risk label, one line showing the command or file, and the buttons on one row. Click the line to see the whole command or the diff, so several waiting agents still fit on screen. `Always` is offered when Claude Code suggests a rule; hover over it, or open the line, to see exactly what it adds.
-- **Risk on permissions:** every permission request gets a coloured label (grey `No known risks`, yellow `Medium risk`, red `High risk`) and the shortest reasons, such as `deletes recursively` or `writes outside the project`. The label is **information only**: it never allows or denies anything by itself. It is based on patterns in the command and the paths, so grey means "no known pattern", not "safe". Deleting, copying or moving outside the project is red, and `cd` is followed through a chain of commands. Text in commit messages and `echo` is not read as a command, and a `cd` within the project or a pipe into `head`/`Select-Object` does not count as a chain. What it deliberately does not catch (variables, scripts, `npm run`, writes by other commands, and more) is listed at the top of `src/risk.js`.
+- **Risk on permissions:** every permission request gets a coloured label (grey `No known risks`, yellow `Medium risk`, red `High risk`) and the shortest reasons, such as `deletes recursively` or `writes outside the project`. The label is **information only**: it never allows or denies anything by itself. It is based on patterns in the command and the paths, so grey means "no known pattern", not "safe". Deleting, copying, moving or `sed -i` outside the project is red, and `cd` is followed through a chain of commands. Deleting only build output inside the project (`node_modules`, `dist`, `build` and the like) is yellow, not red, so the routine clean-up does not wear out the warning. Text in commit messages and `echo` is not read as a command, and a `cd` within the project or a pipe into `head`/`Select-Object` does not count as a chain. What it deliberately does not catch (variables, scripts, `npm run`, writes by other commands, and more) is listed at the top of `src/risk.js`.
 - **Diffs for file changes:** `Edit` and `Write` show a compact diff, at most 20 lines, with `Show all` for the rest. `Write` is compared with the file on disk (read locally, at most 512 kB). The contents of `.env`, keys and similar files are never shown.
 - **Questions:** pick an option (its description shows on hover), or `Other…` for your own answer, and send. Several questions come one at a time (`1/3`): a pick moves on, `Back` goes back, and `Send` comes with the last one. The question is shown in the agent's own window at the same time, and whoever answers first wins.
 - **The arrow** brings up the agent's own window, whether that is VS Code, a terminal or another editor. **The cross** on a card removes the agent.
@@ -27,7 +29,7 @@ A small always-on-top box where every Claude Code agent gets its own buddy, so y
 
 ## Getting started
 
-Agent Huddle runs on Windows and needs [Node.js](https://nodejs.org) 18 or later on your `PATH`. Tested with Claude Code 2.1.322.
+Agent Huddle runs on Windows and needs [Node.js](https://nodejs.org) 22.12 or later on your `PATH` (Electron's installer asks for it; Node 18 and 20 are out of support). Tested with Claude Code 2.1.322.
 
 ### As a Claude Code plugin
 
@@ -58,7 +60,7 @@ npm run install-hooks
 npm start
 ```
 
-`install-hooks` adds hooks to `~/.claude/settings.json` (a backup is saved as `settings.json.huddle-backup`). Sessions that are already running may need a restart to show up. If you also have the plugin installed, the plugin's hooks stay quiet so nothing is reported twice.
+`install-hooks` adds hooks to `~/.claude/settings.json` (the first run saves a backup of the original as `settings.json.huddle-backup`; later runs keep it and never overwrite it). Sessions that are already running may need a restart to show up. If you also have the plugin installed, the plugin's hooks stay quiet so nothing is reported twice.
 
 Try it without Claude Code: start the app and run `npm run demo`. Three fake agents show a permission request, a question, and a team of subagents with a review that does not pass the first time.
 

@@ -43,18 +43,22 @@ test('routing.json picks the same role as the team view, and only the rows you s
   assert.deepEqual(RULE_ROWS.map(([k]) => k), ['explore', 'plan', 'implement', 'test', 'review']);
 });
 
-test('the module only fills in a missing model, never overrides, and fails open', () => {
+// The module's behaviour is run for real in mod.test.js. Here: the file the app
+// writes is one the module's logic reads the same way.
+test('routing.json as the app writes it is what the module applies', async () => {
+  const { pathToFileURL } = require('url');
+  const mod = await import(pathToFileURL(path.join(__dirname, '..', 'hooks', 'mod-logic.mjs')).href);
+  const { chooseModel, parseRouting } = mod;
+  assert.deepEqual([...mod.MODELS].sort(), MODELS.filter(Boolean).sort()); // the app offers what the module accepts ('' = agent decides)
+  const written = routingFile({ enabled: true, explore: 'haiku', review: 'opus' });
+  const rules = parseRouting(JSON.stringify(written));
+  assert.ok(rules);
+  assert.deepEqual(chooseModel(rules, { description: 'Find auth handlers', subagent_type: 'Explore' })?.model, 'haiku');
+  assert.deepEqual(chooseModel(rules, { description: 'Spec review task 3' })?.model, 'opus');
+  assert.equal(chooseModel(rules, { description: 'Implement task 3' }), null); // row left at "agent decides"
+  // The module also has a .catch on its tool.call hook: a rule that fails changes nothing.
   const src = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'huddle-mod.ts'), 'utf8');
-  assert.match(src, /on\('tool\.call', \{ tool: 'Agent' \}/);
-  assert.match(src, /if \(e\.model\) return next\(e\)/);
-  // Only built-in subagents: a custom or plugin agent's own model (from its definition) is kept.
-  assert.match(src, /if \(e\.subagent_type && !BUILTIN_AGENTS\.includes\(e\.subagent_type\)\) return next\(e\)/);
-  assert.match(src, /BUILTIN_AGENTS: readonly string\[\] = \['general-purpose', 'Explore', 'Plan'\]/);
-  assert.match(src, /\.catch\(\(\$, e, next\) => next\(e\)\)/);
-  assert.match(src, /routing\.json/);
-  // It reads files and writes none, and only ever talks to 127.0.0.1.
-  assert.ok(!/\$\.fs\.write|\$\.env\.set|\$\.process/.test(src));
-  assert.deepEqual([...new Set(src.match(/https?:\/\/[^`'"]+/g))], ['http://127.0.0.1:${runtime.port}/event']);
+  assert.match(src, /\}\)\.catch\(\(\$, e, next\) => next\(e\)\)/);
 });
 
 test('store: a Routed notice marks the subagent, whichever event comes first', () => {

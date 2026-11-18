@@ -31,6 +31,23 @@ test('builder command, prompt and the lines read back from claude', () => {
   assert.match(b.reportPrompt('retry-logic', 'Built it on branch worktree-x'), /Do not merge without asking me\./);
 });
 
+test('a plan with no file is written to one, so the command line carries only its path', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'huddle plans '));
+  const text = 'step\n'.repeat(10_000); // 50,000 characters: too long for a Windows command line
+  const file = b.writePlanFile(dir, { title: 'Retry logic / v2', text }, 123);
+  assert.equal(file, path.join(dir, 'plans', 'retry-logic-v2-123.md'));
+  assert.equal(fs.readFileSync(file, 'utf8'), text);
+
+  const store = new Store();
+  store.handle({ session_id: 'p', cwd: dir, hook_event_name: 'SessionStart' });
+  store.sessions.get('p').plan = { title: 'Retry logic / v2', text };
+  const args = b.builderArgs({ title: 'x', prompt: b.builderPrompt(store.planPromptFor('p', file)) });
+  assert.ok(args.at(-1).includes(file));
+  assert.ok(args.join(' ').length < 2000);
+});
+
 // ---- the store's side of a build ----
 
 const P = { session_id: 'planner', cwd: 'C:\\work\\shop' };

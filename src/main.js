@@ -22,19 +22,8 @@ let WIN_H = 800; // capped to the display in createWindow
 const MARGIN = 12;
 
 // Write diffs compare against the file on disk: read locally, never sent anywhere.
-const { MAX_FILE } = require('./diff');
-const store = new Store({
-  readFile: (file) => {
-    let st;
-    try {
-      st = fs.statSync(file);
-    } catch (err) {
-      return err.code === 'ENOENT' ? null : undefined;
-    }
-    if (!st.isFile() || st.size > MAX_FILE) return undefined;
-    return fs.readFileSync(file, 'utf8');
-  },
-});
+const { readForDiff } = require('./diff');
+const store = new Store({ readFile: readForDiff });
 let win = null;
 let tray = null;
 let server = null;
@@ -367,10 +356,11 @@ function startBuild(plannerId, auto) {
   if (!exe) return store.buildFailed(plannerId, 'The claude program was not found.');
 
   const model = routing.enabled && routing.implement ? routing.implement : null;
-  const args = builder.builderArgs({ title: s.plan.title, prompt: builder.builderPrompt(store.planPromptFor(plannerId)), model });
   let out = '';
   let child;
   try {
+    const file = s.plan.path ? null : builder.writePlanFile(paths.home, s.plan);
+    const args = builder.builderArgs({ title: s.plan.title, prompt: builder.builderPrompt(store.planPromptFor(plannerId, file)), model });
     child = spawn(exe, args, { cwd: s.cwd || undefined, env: builder.builderEnv(), windowsHide: true });
   } catch (err) {
     return store.buildFailed(plannerId, err.message);
