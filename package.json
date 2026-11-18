@@ -1,9 +1,16 @@
 {
   "name": "agent-huddle",
-  "version": "0.1.0",
-  "description": "A little always-on-top huddle of buddies showing what your Claude Code agents are doing.",
+  "version": "0.2.0",
+  "description": "An always-on-top box for your Claude Code agents: one card per session, permissions answered in place, subagents, quota, and plans built in the background.",
   "main": "src/main.js",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jepsterrr/agent-huddle.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "electron .",
     "test": "node --test",

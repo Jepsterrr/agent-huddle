@@ -1,4 +1,4 @@
-const test = require('node:test');
+﻿const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -47,18 +47,19 @@ test('the plugin manifest, marketplace and hooks agree with install-hooks', () =
   // Electron is a runtime dependency, so the plugin's automatic install includes it.
   assert.ok(readJson('package.json').dependencies.electron);
   // The quota comes through the plugin's own module, not a statusLine.
-  assert.deepEqual(hooks.modules, ['./usage-mod.ts']);
-  assert.ok(fs.existsSync(path.join(ROOT, 'hooks', 'usage-mod.ts')));
+  assert.deepEqual(hooks.modules, ['./huddle-mod.ts']);
+  assert.ok(fs.existsSync(path.join(ROOT, 'hooks', 'huddle-mod.ts')));
 });
 
-test('the usage module sends what the statusLine bridge sends, to 127.0.0.1 only', () => {
-  const src = fs.readFileSync(path.join(ROOT, 'hooks', 'usage-mod.ts'), 'utf8');
+test('the plugin module sends what the statusLine bridge sends, to 127.0.0.1 only', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'hooks', 'huddle-mod.ts'), 'utf8');
   assert.match(src, /on\('session\.measure'/);
   // Same event name, mode and fields as hook.js's statusBody().
   for (const field of ["hook_event_name: 'StatusLine'", 'session_id:', 'cost_usd:', 'context_pct:', 'rate_limits:', 'used_percentage', 'resets_at']) {
-    assert.ok(src.includes(field), `usage-mod.ts lacks ${field}`);
+    assert.ok(src.includes(field), `huddle-mod.ts lacks ${field}`);
   }
-  assert.ok(src.includes("'x-huddle-mode': 'status'") && src.includes("'x-huddle-token': runtime.token"));
+  // Sent as plain events; the store knows StatusLine by its name, whatever the mode.
+  assert.ok(src.includes("'x-huddle-mode': 'notify'") && src.includes("'x-huddle-token': runtime.token"));
   // The only address it talks to.
   const urls = src.match(/https?:\/\/[^`'"]+/g) || [];
   assert.deepEqual([...new Set(urls)], ['http://127.0.0.1:${runtime.port}/event']);
@@ -134,3 +135,4 @@ test('setup refuses to run without its data folder', () => {
   const r2 = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'setup.js'), '--data', '${CLAUDE_PLUGIN_DATA}'], { encoding: 'utf8' });
   assert.equal(r2.status, 1); // an unexpanded variable is not a folder
 });
+

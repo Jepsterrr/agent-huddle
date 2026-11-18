@@ -1,7 +1,7 @@
 {
-  "description": "Agent Huddle: forwards Claude Code events to the Agent Huddle app on 127.0.0.1, and sends quota and cost figures through a small module. Exits silently when the app is not running.",
+  "description": "Agent Huddle: forwards Claude Code events to the Agent Huddle app on 127.0.0.1. Its module sends quota figures and, when you turn it on in Huddle, sets models for subagents that have none. Exits silently when the app is not running.",
   "modules": [
-    "./usage-mod.ts"
+    "./huddle-mod.ts"
   ],
   "hooks": {
     "SessionStart": [

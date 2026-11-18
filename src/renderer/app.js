@@ -43,6 +43,9 @@ const DEFAULTS = {
   dnd: false,
   showUsage: true,
   usageTray: true,
+  autoBuild: false,
+  routing: { enabled: false },
+  routingRows: [],
   startWithWindows: false,
   canDetectWindows: true,
 };
@@ -204,11 +207,12 @@ function makeCard(s) {
   const prog = el('span', 'prog');
   const num = el('span', 'num');
   const lbl = el('span', 'lbl');
-  prog.append(num, lbl);
+  const dots = el('span', 'tdots'); // one per subagent of the current work
+  prog.append(num, lbl, dots);
   const track = el('span', 'track');
   const fill = el('span', 'fill');
   track.append(fill);
-  for (const n of [title, sub, prog, track]) n.style.display = 'block';
+  for (const n of [title, sub, track]) n.style.display = 'block';
   info.append(title, sub, prog, track);
   main.append(info);
   main.addEventListener('click', () => {
@@ -235,11 +239,22 @@ function makeCard(s) {
   row.append(main, acts);
   const ask = el('div', 'ask');
   ask.hidden = true;
+  const planBox = el('div', 'planbar');
+  planBox.hidden = true;
+  const teamBox = el('div', 'team');
+  teamBox.hidden = true;
   const steps = el('ol', 'steps');
   steps.hidden = true;
-  li.append(row, ask, steps);
+  li.append(row, ask, planBox, teamBox, steps);
 
-  return { li, refs: { main, title, sub, num, lbl, fill, ask, steps }, shownPending: null, stepEls: new Map() };
+  return {
+    li,
+    refs: { main, title, sub, num, lbl, dots, fill, ask, plan: planBox, team: teamBox, steps },
+    planPick: false, // choosing which session gets the plan
+    shownPending: null,
+    stepEls: new Map(),
+    teamOpen: new Set(), // team rows opened to their full message
+  };
 }
 
 function updateCard(c, s) {
@@ -267,9 +282,161 @@ function updateCard(c, s) {
     refs.fill.style.width = '';
   }
 
+  renderDots(c, s);
+  const looping = (s.team || []).some((a) => a.status === 'running' && a.round >= LOOP_ROUND);
+  c.li.toggleAttribute('data-loop', looping);
+  refs.sub.title = looping ? 'The same step has come round several times on this task' : '';
   renderAsk(c, s);
+  refs.plan.hidden = !open || !s.plan;
+  if (open && s.plan) renderPlan(c, s);
+  else c.planPick = false;
+  refs.team.hidden = !open || !s.team?.length;
+  if (open && s.team?.length) renderTeam(c, s);
   refs.steps.hidden = !open;
   if (open) renderSteps(c, s);
+}
+
+// ---- a plan this session wrote, and sending it to another session ----
+
+const sessionName = (s) => s?.title || s?.name || 'session';
+
+function renderPlan(c, s) {
+  const box = c.refs.plan;
+  const p = s.plan;
+  const others = state.sessions.filter((x) => x.id !== s.id && x.canReceive);
+  const sent = p.sent;
+  const key = JSON.stringify([p.title, p.at, sent, c.planPick, others.map((x) => [x.id, sessionName(x)])]);
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.textContent = '';
+
+  const name = el('span', 'plan-name', p.title);
+  name.title = p.path || 'Plan from plan mode';
+  box.append(el('span', 'plan-icon', '▤'), name);
+
+  const act = (text, fn, cls = 'btn link') => {
+    const b = el('button', cls, text);
+    b.type = 'button';
+    b.addEventListener('click', fn);
+    return b;
+  };
+  const right = el('span', 'plan-act');
+  const build = p.build;
+  if (build) {
+    const name = `build: ${p.title}`;
+    if (build.status === 'starting' || build.status === 'running') {
+      const st = el('span', 'plan-state', build.status === 'starting' ? 'Starting a builder…' : 'Building in background');
+      st.title = `${name}: its questions come here`;
+      right.append(el('span', 'tdot', ''), st, act('Stop', () => api.stopBuild(s.id)));
+      right.firstChild.dataset.v = 'run';
+    } else if (build.status === 'done') {
+      const word = { queued: ' · report on its way', delivered: ' · report sent here', failed: ' · report not delivered', unavailable: '' }[build.report] || '';
+      const st = el('span', 'plan-state ok', `Built ✓${word}`);
+      st.title = build.report === 'unavailable' ? `The report is on the "${name}" card` : build.message || '';
+      right.append(st);
+    } else {
+      const st = el('span', 'plan-state bad', build.status === 'stopped' ? 'Build stopped' : 'Build did not start');
+      st.title = build.reason || '';
+      right.append(st, act(build.status === 'stopped' ? 'Build again' : 'Try again', () => api.buildPlan(s.id)));
+    }
+  } else if (sent) {
+    const to = sent.toName || 'session';
+    if (sent.status === 'queued') {
+      right.append(el('span', 'plan-state', `Waiting for ${to}…`), act('Cancel', () => api.cancelPlan(s.id)));
+    } else if (sent.status === 'failed') {
+      right.append(el('span', 'plan-state bad', `${to} could not take it`), act('Send again', () => ((c.planPick = true), api.cancelPlan(s.id))));
+    } else {
+      const okText = el('span', 'plan-state ok', `Sent to ${to} ✓`);
+      okText.title = sent.status === 'delivered' ? 'It arrived as a prompt there' : 'Collected; arriving';
+      right.append(okText);
+    }
+  } else if (c.planPick) {
+    const pick = el('span', 'plan-pick');
+    pick.append(el('span', 'plan-state', 'To:'));
+    for (const x of others) {
+      const b = act(sessionName(x), () => {
+        c.planPick = false;
+        api.sendPlan(s.id, x.id);
+      }, 'chip');
+      b.style.setProperty('--hue', x.hue);
+      b.title = x.cwd;
+      pick.append(b);
+    }
+    pick.append(act('Cancel', () => ((c.planPick = false), renderPlan(c, s))));
+    right.append(pick);
+  } else {
+    const b = act('Build', () => api.buildPlan(s.id));
+    b.title = 'Start a background session that carries out this plan; its questions come here';
+    right.append(b);
+    if (others.length) right.append(act('Send to…', () => ((c.planPick = true), renderPlan(c, s))));
+  }
+  box.append(right);
+}
+
+// ---- the team: the session's subagents (see src/team.js) ----
+
+const VERDICT_WORD = { pass: 'passed', fail: 'did not pass', warn: 'done, with concerns' };
+const LOOP_ROUND = 3; // the same step this many times on one task: worth a look
+
+const teamState = (a) => (a.status === 'running' ? 'run' : a.status === 'failed' ? 'fail' : a.verdict || 'done');
+const ago = (ms) => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} s` : `${Math.round(ms / 60_000)} min`);
+
+function teamMeta(a) {
+  const bits = [];
+  if (a.model) bits.push(a.routed ? `${a.model} (rule)` : a.model);
+  if (a.round > 1) bits.push(`round ${a.round}`);
+  bits.push(ago((a.endedAt || Date.now()) - a.startedAt));
+  return bits.join(' · ');
+}
+
+// The collapsed card: one quiet dot per subagent, like a row of checks.
+function renderDots(c, s) {
+  const box = c.refs.dots;
+  const t = s.team || [];
+  const MAX = 10;
+  const key = t.map((a) => `${teamState(a)}${a.round >= LOOP_ROUND ? '!' : ''}`).join('');
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.textContent = '';
+  for (const a of t.slice(-MAX)) {
+    const d = el('span', 'tdot');
+    d.dataset.v = teamState(a);
+    if (a.status === 'running' && a.round >= LOOP_ROUND) d.dataset.loop = '';
+    d.title = `${a.label}${a.model ? ` · ${a.model}` : ''}${a.verdict ? ` · ${VERDICT_WORD[a.verdict]}` : a.status === 'running' ? ' · working' : ''}`;
+    box.append(d);
+  }
+  if (t.length > MAX) box.prepend(el('span', 'tmore', `+${t.length - MAX}`));
+}
+
+// The opened card: one line per subagent; a click shows its last message.
+function renderTeam(c, s) {
+  const box = c.refs.team;
+  box.textContent = '';
+  for (const a of s.team) {
+    const row = el('div', 'trow');
+    row.dataset.v = teamState(a);
+    if (a.status === 'running' && a.round >= LOOP_ROUND) row.dataset.loop = '';
+    const head = el('div', 'thead');
+    head.append(el('span', 'tmark'), el('span', 'tlabel', a.label), el('span', 'tmeta', teamMeta(a)));
+    row.append(head);
+    const key = a.key || a.id;
+    const open = c.teamOpen.has(key);
+    if (a.summary && !open) row.append(el('div', 'tsum', a.summary));
+    if (open && a.message) {
+      const full = el('div', 'tfull');
+      appendMarkdown(full, a.message);
+      row.append(full);
+    }
+    if (a.message) {
+      row.classList.add('openable');
+      row.addEventListener('click', () => {
+        if (String(getSelection())) return;
+        c.teamOpen.has(key) ? c.teamOpen.delete(key) : c.teamOpen.add(key);
+        renderTeam(c, s);
+      });
+    }
+    box.append(row);
+  }
 }
 
 // What the agent is doing right now, in one line.
@@ -279,10 +446,19 @@ function activity(s) {
   if (p) return p.kind === 'question' ? `Question: ${p.questions[0]?.header || 'needs your answer'}` : `Wants to: ${p.title || p.tool}`;
   if (s.state === 'attention') return s.note || 'Needs you';
   const tools = s.steps.filter((st) => st.kind === 'tool');
+  // A subagent at work says who it is: "Spec review task 3 · opus · round 2".
+  const busy = (s.team || []).filter((a) => a.status === 'running').at(-1);
+  if (busy && (s.state === 'working' || s.state === 'done')) {
+    return `${busy.label}${busy.model ? ` · ${busy.model}` : ''}${busy.round > 1 ? ` · round ${busy.round}` : ''}`;
+  }
   if (s.state === 'working') {
     const running = [...tools].reverse().find((st) => st.status === 'running');
     return (running || tools.at(-1))?.title || 'Thinking';
   }
+  const build = s.plan?.build;
+  if (build && ['starting', 'running'].includes(build.status)) return `Building in background: ${s.plan.title}`;
+  if (build?.status === 'done' && s.state === 'done') return `Built: ${s.plan.title}`;
+  if (s.state === 'done' && s.plan && !s.plan.sent && !build) return `Plan ready: ${s.plan.title}`;
   if (s.state === 'done') return `Finished after ${tools.length} step${tools.length === 1 ? '' : 's'}`;
   return 'Waiting for a prompt';
 }
@@ -579,7 +755,10 @@ function renderSteps(c, s) {
   const fresh = c.stepEls.size === 0;
   const stick = fresh || box.scrollHeight - box.scrollTop - box.clientHeight < 48;
   const seen = new Set();
+  // With the team list above, the "start subagent" steps would say it twice.
+  const hideAgents = (s.team || []).length > 0;
   for (const st of s.steps) {
+    if (hideAgents && (st.tool === 'Agent' || st.tool === 'Task')) continue;
     seen.add(st.id);
     let li = c.stepEls.get(st.id);
     if (!li) {
@@ -723,8 +902,9 @@ const SETTINGS = [
   ['autoHide', "Hide when I'm with the agent", 'Stay out of the way while its own window is in front', true],
   ['hideFullscreen', 'Hide over full-screen', 'Films, games and presentations', true],
   ['protect', 'Hide from screen sharing', 'Also keeps it out of recordings and screenshots'],
-  ['showUsage', 'Show quota and cost', 'Bar under the header (needs the status line bridge from install-hooks)'],
+  ['showUsage', 'Show quota and cost', '5-hour and weekly limits under the header'],
   ['usageTray', 'Warn near the limit', 'Tray icon turns red at 90% of a quota'],
+  ['autoBuild', 'Build plans automatically', 'A finished plan starts a background session; its questions come here'],
   ['dnd', 'Do not disturb', 'Stay hidden. Every question is asked in the editor only'],
   ['startWithWindows', 'Start with Windows', 'Otherwise it starts with your first Claude Code session'],
 ];
@@ -752,6 +932,23 @@ function buildSettings() {
     switches.set(key, { sw, needsDetection });
     box.append(sw);
   }
+  // Subagent models: one switch; when on, one row per role whose value
+  // button steps through the models (no dropdowns: the huddle takes no focus).
+  const rSw = el('button', 'switch');
+  rSw.type = 'button';
+  rSw.setAttribute('role', 'switch');
+  const rText = el('span', 'sw-text');
+  rText.append(
+    el('span', 'sw-title', 'Choose subagent models'),
+    el('span', 'sw-hint', 'For subagents the agent gives no model (plugin). Implement also picks the builder’s model')
+  );
+  rSw.append(rText, el('span', 'sw-knob'));
+  rSw.addEventListener('click', () => api.setRouting('enabled'));
+  const rRows = el('div', 'rrows');
+  routingUi.sw = rSw;
+  routingUi.rows = rRows;
+  box.append(rSw, rRows);
+
   const row = el('div', 'btns');
   const reset = el('button', 'btn', 'Reset position');
   const quit = el('button', 'btn danger', 'Quit Agent Huddle');
@@ -767,6 +964,33 @@ function renderSettings() {
   for (const [key, { sw, needsDetection }] of switches) {
     sw.setAttribute('aria-checked', String(!!cfg()[key]));
     sw.disabled = !!needsDetection && !cfg().canDetectWindows;
+  }
+  renderRouting();
+}
+
+const routingUi = { sw: null, rows: null, key: '' };
+
+function renderRouting() {
+  const r = cfg().routing || { enabled: false };
+  const rows = cfg().routingRows || [];
+  if (!routingUi.sw) return;
+  routingUi.sw.setAttribute('aria-checked', String(!!r.enabled));
+  routingUi.rows.hidden = !r.enabled;
+  const key = JSON.stringify([r, rows]);
+  if (key === routingUi.key) return;
+  routingUi.key = key;
+  routingUi.rows.textContent = '';
+  for (const [k, label] of rows) {
+    const model = r[k] || '';
+    const row = el('div', 'rrow');
+    const val = el('button', 'rval', model || 'agent decides');
+    val.type = 'button';
+    if (!model) val.dataset.auto = '';
+    val.title = 'Click for the next model';
+    val.setAttribute('aria-label', `${label}: ${model || 'agent decides'}. Click for the next model`);
+    val.addEventListener('click', () => api.setRouting(k));
+    row.append(el('span', 'rlabel', label), val);
+    routingUi.rows.append(row);
   }
 }
 

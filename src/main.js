@@ -11,6 +11,9 @@ const focus = require('./foreground');
 const { trayIcon } = require('./tray-icon');
 const { peakPct } = require('./usage');
 const { StartWatch } = require('./started');
+const { RULE_ROWS, cleanRouting, nextModel, routingFile } = require('./routing');
+const builder = require('./builder');
+const { execFile } = require('child_process');
 
 // The window is a fixed-size transparent canvas. Clicks pass straight through
 // it except where the renderer says there is something to hit.
@@ -69,9 +72,21 @@ const settings = {
   collapsed: false, // the list is folded up into the header
   showUsage: true, // quota / cost meter in the header (data comes from the statusLine bridge)
   usageTray: true, // tray icon turns red near a quota limit
+  autoBuild: false, // a finished plan starts a background builder session by itself
 };
+const MAX_BUILDS = 1; // background builders at once, to spare the quota
 const USAGE_WARN = 90; // percent at which the tray warns
 let settingsOpen = false; // the settings view is showing; keeps the huddle on screen
+// Subagent model rules (routing.js); written to routing.json for the plugin module.
+let routing = cleanRouting(null);
+
+function writeRouting() {
+  try {
+    fs.writeFileSync(path.join(paths.home, 'routing.json'), JSON.stringify(routingFile(routing), null, 2));
+  } catch (err) {
+    console.error('[huddle] could not write routing.json:', err.message);
+  }
+}
 
 const loginOpts = () => ({ path: process.execPath, args: app.isPackaged ? [] : [app.getAppPath()] });
 
@@ -86,6 +101,8 @@ async function start() {
   fs.mkdirSync(paths.home, { recursive: true });
   const cfg = loadConfig();
   for (const key of Object.keys(settings)) if (typeof cfg[key] === 'boolean') settings[key] = cfg[key];
+  routing = cleanRouting(cfg.routing);
+  writeRouting(); // the file always says what the settings say (off by default)
   if (!focus.isAvailable()) settings.autoHide = settings.hideFullscreen = false;
   // As a plugin the app's folder changes with every update; keep the Windows
   // start-up entry pointing at the folder that is running now.
@@ -122,7 +139,9 @@ async function start() {
   // and let a quota window that has reset drop out of the tray.
   setInterval(() => {
     store.reap(isAlive);
+    store.expireOutbox(); // a session that stopped asking will not collect what waits for it
     updateTray();
+    schedulePush(); // which sessions can take a plan changes with time alone
   }, 10_000);
 
   screen.on('display-removed', keepOnScreen);
@@ -148,7 +167,23 @@ async function start() {
     if (win && !drag) win.setIgnoreMouseEvents(!hit, { forward: true });
   });
   ipcMain.on('keyboard', (_e, want) => setKeyboard(!!want));
+  // 'enabled' turns the rules on or off; a row's key moves it to its next model.
+  ipcMain.on('set-routing', (_e, key) => {
+    if (key === 'enabled') routing.enabled = !routing.enabled;
+    else if (RULE_ROWS.some(([k]) => k === key)) routing[key] = nextModel(routing[key]);
+    else return;
+    saveConfig({ routing });
+    writeRouting();
+    push();
+  });
   ipcMain.on('answer', (_e, pendingId, resp) => store.answer(pendingId, resp));
+  ipcMain.on('send-plan', (_e, fromId, toId) => store.sendPlan(String(fromId), String(toId)));
+  ipcMain.on('build-plan', (_e, plannerId) => startBuild(String(plannerId), false));
+  ipcMain.on('stop-build', (_e, plannerId) => stopBuild(String(plannerId)));
+  store.on('plan-ready', (plannerId) => {
+    if (settings.autoBuild) startBuild(plannerId, true);
+  });
+  ipcMain.on('cancel-plan', (_e, fromId) => store.cancelPlan(String(fromId)));
   ipcMain.on('dismiss', (_e, sessionId) => store.dismiss(sessionId));
   ipcMain.on('focus', (_e, sessionId) => {
     const s = store.sessions.get(sessionId);
@@ -284,7 +319,11 @@ function push() {
   // Nothing is drawn while hidden; the state is sent again when it is shown.
   if (!win || win.isDestroyed() || !shown) return;
   // host: what to call the app each agent runs in ("VS Code", "the terminal", …).
-  const sessions = store.snapshot().map((s) => ({ ...s, host: chainEntry(s)?.host || 'the editor' }));
+  const sessions = store.snapshot().map((s) => ({
+    ...s,
+    host: chainEntry(s)?.host || 'the editor',
+    canReceive: store.canReceive(s), // its plugin module is polling: it can take a plan
+  }));
   win.webContents.send('state', {
     sessions,
     usage: store.usageNow(),
@@ -293,6 +332,8 @@ function push() {
       ...settings,
       startWithWindows: app.getLoginItemSettings(loginOpts()).openAtLogin,
       canDetectWindows: focus.isAvailable(),
+      routing,
+      routingRows: RULE_ROWS,
     },
   });
 }
@@ -304,6 +345,62 @@ function isAlive(pid) {
   } catch (err) {
     return err.code === 'EPERM';
   }
+}
+
+// ---- background builders (builder.js) ----
+//
+// A finished plan (by itself when "Build plans automatically" is on, else by
+// the Build button) starts `claude --bg` in the planner's folder. Its questions
+// come to the huddle; when it is done its report goes back to the planner.
+
+function startBuild(plannerId, auto) {
+  const s = store.sessions.get(plannerId);
+  if (!s?.plan || ['starting', 'running'].includes(s.plan.build?.status)) return;
+  if (store.runningBuilds() >= MAX_BUILDS) {
+    if (!auto) store.buildStarting(plannerId) && store.buildFailed(plannerId, 'Another build is running; one at a time.');
+    return;
+  }
+  const peak = peakPct(store.usageNow());
+  if (auto && peak != null && peak >= USAGE_WARN) return; // close to the quota: wait for a click
+  const exe = builder.findClaude();
+  store.buildStarting(plannerId);
+  if (!exe) return store.buildFailed(plannerId, 'The claude program was not found.');
+
+  const model = routing.enabled && routing.implement ? routing.implement : null;
+  const args = builder.builderArgs({ title: s.plan.title, prompt: builder.builderPrompt(store.planPromptFor(plannerId)), model });
+  let out = '';
+  let child;
+  try {
+    child = spawn(exe, args, { cwd: s.cwd || undefined, env: builder.builderEnv(), windowsHide: true });
+  } catch (err) {
+    return store.buildFailed(plannerId, err.message);
+  }
+  child.stdout?.on('data', (c) => (out += c));
+  child.stderr?.on('data', (c) => (out += c));
+  child.on('error', (err) => store.buildFailed(plannerId, err.message));
+  child.on('close', () => {
+    const bg = builder.parseBackgrounded(out);
+    if (!bg) return store.buildFailed(plannerId, out.trim().split('\n').slice(-2).join(' ') || 'Could not start');
+    store.buildLaunched(plannerId, { bgId: bg.id });
+    store.noticeBuilding(plannerId, builder.builderName(s.plan.title));
+    linkBuilder(plannerId, exe, bg.id, 0);
+  });
+}
+
+// Find the builder's session id, so its card can be tied to the plan.
+function linkBuilder(plannerId, exe, bgId, tries) {
+  execFile(exe, ['agents', '--json'], { env: builder.builderEnv(), windowsHide: true, timeout: 15_000 }, (err, stdout) => {
+    const sessionId = err ? null : builder.sessionIdOf(stdout, bgId);
+    if (sessionId) store.buildLaunched(plannerId, { sessionId });
+    else if (tries < 5) setTimeout(() => linkBuilder(plannerId, exe, bgId, tries + 1), 2000);
+  });
+}
+
+function stopBuild(plannerId) {
+  const b = store.sessions.get(plannerId)?.plan?.build;
+  const exe = builder.findClaude();
+  if (b?.bgId && exe) execFile(exe, ['stop', b.bgId], { env: builder.builderEnv(), windowsHide: true, timeout: 15_000 }, () => {});
+  store.buildStopped(plannerId);
 }
 
 // ---- keyboard: only while typing ----
@@ -345,6 +442,9 @@ function debugEvent(p, mode) {
     agent_id: p.agent_id ? 'present' : 'absent',
     agent_type: typeof p.agent_type === 'string' ? p.agent_type : undefined,
     fields: Object.keys(p).sort(),
+    // Names only, never values: which fields a tool's input and result carry.
+    input_fields: p.tool_input && typeof p.tool_input === 'object' ? Object.keys(p.tool_input).sort() : undefined,
+    response_fields: p.tool_response && typeof p.tool_response === 'object' ? Object.keys(p.tool_response).sort() : undefined,
   };
   try {
     fs.appendFileSync(path.join(paths.home, 'events.log'), JSON.stringify(line) + '\n');
@@ -648,7 +748,8 @@ function openInVSCode(cwd) {
 
 function loadConfig() {
   try {
-    return JSON.parse(fs.readFileSync(paths.configFile, 'utf8')) || {};
+    // A byte order mark (Notepad, PowerShell 5.1) would make JSON.parse fail.
+    return JSON.parse(fs.readFileSync(paths.configFile, 'utf8').replace(/^﻿/, '')) || {};
   } catch {
     return {};
   }

@@ -7,7 +7,7 @@
 // Electron runtime into the plugin's data folder (--data, ${CLAUDE_PLUGIN_DATA}),
 // which survives plugin updates (about 100 MB, once per Electron version), and
 // then starts the app. It changes nothing in the user's settings: the quota
-// figures come through the plugin's own module (hooks/usage-mod.ts).
+// figures come through the plugin's own module (hooks/huddle-mod.ts).
 //
 //   node scripts/setup.js --data <dir>
 

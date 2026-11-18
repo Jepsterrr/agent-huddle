@@ -20,7 +20,49 @@ function send(evt, wait = false) {
 
 const A = { session_id: 'demo-a', cwd: path.resolve(__dirname, '..') };
 const B = { session_id: 'demo-b', cwd: path.join(path.resolve(__dirname, '..'), 'src') };
+const C = { session_id: 'demo-c', cwd: path.join(path.resolve(__dirname, '..'), 'scripts') };
 let n = 0;
+
+// One subagent, from its start to its last message, the way Claude Code reports it.
+async function subagent(base, description, model, message, ms) {
+  const tool_use_id = `demo-${++n}`;
+  const agent_id = `demo-agent-${n}`;
+  const tool_input = { description, prompt: '(demo)', subagent_type: 'general-purpose', model };
+  await send({ ...base, hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input, tool_use_id });
+  await send({ ...base, hook_event_name: 'SubagentStart', agent_id, agent_type: 'general-purpose' });
+  await send({
+    ...base,
+    hook_event_name: 'PostToolUse',
+    tool_name: 'Agent',
+    tool_input,
+    tool_use_id,
+    tool_response: { agentId: agent_id, resolvedModel: `claude-${model}`, status: 'async_launched' },
+  });
+  await sleep(ms);
+  await send({ ...base, hook_event_name: 'SubagentStop', agent_id, agent_type: 'general-purpose', last_assistant_message: message });
+}
+
+// A third agent that works the way superpowers' subagent-driven development
+// does: an implementer, a reviewer who finds a gap, a fix, the review again.
+// Open its card to see the team. (No plans here: a plan could start a real
+// background builder when "Build plans automatically" is on.)
+async function teamDemo() {
+  await send({ ...C, hook_event_name: 'SessionStart', source: 'startup' });
+  await send({ ...C, hook_event_name: 'UserPromptSubmit', prompt: 'Carry out task 3 of the plan with subagents.' });
+  await tool(C, 'TodoWrite', {
+    todos: [
+      { content: 'Task 1', status: 'completed' },
+      { content: 'Task 2', status: 'completed' },
+      { content: 'Task 3: retry logic', activeForm: 'Adding retry logic', status: 'in_progress' },
+      { content: 'Task 4', status: 'pending' },
+    ],
+  }, 200);
+  await subagent(C, 'Implement task 3', 'sonnet', 'Status: DONE\n\nAdded retry with backoff. 5/5 tests passing.', 2500);
+  await subagent(C, 'Spec review task 3', 'opus', '❌ Issues:\n- Missing: progress reporting (the spec asks for it every 100 items)', 2500);
+  await subagent(C, 'Fix spec gaps task 3', 'sonnet', 'Status: DONE\n\nAdded progress reporting.', 2500);
+  await subagent(C, 'Spec review task 3', 'opus', '✅ Spec compliant: all requirements met.', 2500);
+  await send({ ...C, hook_event_name: 'Stop', last_assistant_message: 'Task 3 is done and reviewed.' });
+}
 
 async function tool(base, tool_name, tool_input, ms = 700) {
   const tool_use_id = `demo-${++n}`;
@@ -37,6 +79,7 @@ async function tool(base, tool_name, tool_input, ms = 700) {
   await send({ ...B, hook_event_name: 'SessionStart', source: 'startup' });
   await send({ ...A, hook_event_name: 'UserPromptSubmit', prompt: 'Add a dark mode toggle to the settings page.' });
   await send({ ...B, hook_event_name: 'UserPromptSubmit', prompt: 'Why is the build slow?' });
+  const team = teamDemo(); // runs alongside the other two
 
   await tool(A, 'Grep', { pattern: 'theme' });
   await tool(A, 'Read', { file_path: 'C:\\app\\src\\settings\\Settings.tsx' });
@@ -87,5 +130,6 @@ async function tool(base, tool_name, tool_input, ms = 700) {
 
   await send({ ...A, hook_event_name: 'Stop', last_assistant_message: 'Dark mode toggle added to Settings.' });
   await send({ ...B, hook_event_name: 'Stop', last_assistant_message: 'The build is slow because of source maps.' });
+  await team;
   console.log('Done. The demo agents disappear by themselves within ten seconds.');
 })();

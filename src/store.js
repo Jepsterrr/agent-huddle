@@ -11,6 +11,21 @@ const { describe, permissionDetail, describeSuggestions, clip, base } = require(
 const { assess } = require('./risk');
 const { diffForTool } = require('./diff');
 const { mergeUsage, pruneUsage } = require('./usage');
+const team = require('./team');
+const { builderName, reportPrompt, isBuilderPrompt } = require('./builder');
+
+const AGENT_TOOLS = new Set(['Agent', 'Task']);
+const MAX_TEAM = 40;
+const FILE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
+
+// A plan file: Markdown in a plans folder (superpowers writes
+// docs/superpowers/plans/YYYY-MM-DD-<name>.md) or with "plan" in its name.
+const isPlanFile = (p) =>
+  /\.md$/i.test(p || '') && (/(^|[\\/])plans?[\\/][^\\/]+$/i.test(p) || /plan[^\\/]*\.md$/i.test(base(p)));
+// "2026-11-18-retry-logic.md" -> "retry-logic"
+const planTitle = (p) => base(p).replace(/\.md$/i, '').replace(/^\d{4}-\d{2}-\d{2}[-_ ]?/, '') || 'plan';
+// A mod that polled within this long can take a plan.
+const MOD_ALIVE_MS = 15_000;
 
 const MAX_STEPS = 300;
 const MOVED_ON_MS = 2000;
@@ -28,6 +43,8 @@ class Store extends EventEmitter {
     this.home = opts.home || os.homedir();
     this.readFile = opts.readFile || null;
     this.usage = {}; // account quota windows, see usage.js
+    this.outbox = new Map(); // session id -> plan waiting for that session's module to collect
+    this.builders = new Map(); // builder session id -> planner session id
     this.sessions = new Map();
     this.dismissed = new Set();
     this.waiters = new Map(); // pendingId -> { sessionId, pending, input, resolve }
@@ -53,6 +70,11 @@ class Store extends EventEmitter {
       this._status(evt);
       return null;
     }
+    if (name === 'Inbox') return this._inbox(evt);
+    if (name === 'Delivered') {
+      this._delivered(evt);
+      return null;
+    }
 
     if (name === 'SessionEnd') {
       this._end(id);
@@ -66,6 +88,13 @@ class Store extends EventEmitter {
 
     const s = this._session(evt);
     this._seenPid(s, meta.ppid);
+    // A background builder Huddle started: name its card after the plan.
+    const plannerId = this.builders.get(s.id);
+    if (plannerId && !s.builderOf) {
+      s.builderOf = plannerId;
+      const planner = this.sessions.get(plannerId);
+      s.title = builderName(planner?.plan?.title);
+    }
     const held = this._apply(s, name, evt, mode);
     s.updatedAt = Date.now();
     this._changed();
@@ -92,11 +121,14 @@ class Store extends EventEmitter {
           s.tasks = [];
           s.progress = null;
         }
+        // A new request starts a new team, unless subagents are still at work.
+        if (!s.team.some((a) => a.status === 'running')) s.team = [];
         // Claude Code hands some events to the model as if the user typed them
         // (a background task finishing). Show those as what they are, not as "You".
         const note = systemNotice(evt.prompt);
         if (note) this._step(s, { kind: 'agent', title: note });
         else this._step(s, { kind: 'prompt', title: clip(evt.prompt, 600) });
+        this._linkByPrompt(s, evt.prompt);
         return null;
 
       case 'PreToolUse': {
@@ -115,6 +147,11 @@ class Store extends EventEmitter {
           s.progress = progress(s.tasks);
         }
         this._movedOn(s, evt);
+        if (AGENT_TOOLS.has(tool)) this._teamCall(s, evt);
+        // Plan mode hands its plan over here (and in planFilePath, when it saved one).
+        if (tool === 'ExitPlanMode' && (input.plan || input.planFilePath)) {
+          this._setPlan(s, { path: input.planFilePath, text: input.plan });
+        }
         const key = evt.tool_use_id;
         if (!key || !s.steps.some((st) => st.key === key)) {
           this._step(s, { kind: 'tool', key, tool, agent, status: 'running', ...describe(tool, input) });
@@ -141,6 +178,14 @@ class Store extends EventEmitter {
         if (typeof evt.duration_ms === 'number') st.ms = evt.duration_ms;
         if (failed && evt.error) st.error = clip(evt.error, 400);
         if (!failed) this._trackTask(s, tool, input, evt.tool_response);
+        if (AGENT_TOOLS.has(tool)) this._teamCalled(s, evt, failed);
+        // The main agent wrote a plan file (a subagent's drafts do not count).
+        if (!failed && !evt.agent_id && FILE_TOOLS.has(tool) && isPlanFile(input.file_path)) {
+          this._setPlan(s, { path: input.file_path });
+        } else if (!failed && s.plan && !s.plan.underway && this._carriesOut(s, tool, input, evt)) {
+          // The session went on to carry out its own plan: no builder for it.
+          s.plan.underway = true;
+        }
         if (!s.pending.length) s.state = 'working';
         return null;
       }
@@ -207,14 +252,31 @@ class Store extends EventEmitter {
         if (evt.last_assistant_message) {
           this._step(s, { kind: 'message', title: clip(evt.last_assistant_message, 1500) });
         }
+        if (this.builders.has(s.id)) this._builderDone(s, evt.last_assistant_message);
+        // A finished plan, not yet handed on and not being carried out here:
+        // the app may start a builder for it. Only a plan saved in a plans
+        // folder qualifies; plan mode goes on to carry out its own plan.
+        else if (s.plan && !s.plan.sent && !s.plan.build && !s.plan.underway && s.plan.kind === 'folder') {
+          this.emit('plan-ready', s.id);
+        }
         return null;
 
+      // From the plugin module: one of your model rules chose this subagent's model.
+      case 'Routed': {
+        const key = evt.tool_use_id || null;
+        const a = (key && s.team.find((x) => x.key === key)) || this._teamAdd(s, { key });
+        if (typeof evt.model === 'string') a.model = team.shortModel(evt.model);
+        a.routed = typeof evt.family === 'string' ? evt.family : true;
+        return null;
+      }
+
+      // Shown in the team list (team.js), not as steps.
       case 'SubagentStart':
-        this._step(s, { kind: 'agent', title: `Subagent started: ${evt.agent_type || 'agent'}` });
+        this._teamStart(s, evt);
         return null;
 
       case 'SubagentStop':
-        this._step(s, { kind: 'agent', title: `Subagent finished: ${evt.agent_type || 'agent'}` });
+        this._teamStop(s, evt);
         return null;
 
       default:
@@ -302,12 +364,328 @@ class Store extends EventEmitter {
     this._settle(pendingId, null, 'working');
   }
 
+  // ---- plans: hand one session's plan to another (layer 3) ----
+
+  // Sessions whose plugin module is polling, i.e. that can take a plan.
+  canReceive(s) {
+    return !!s && Date.now() - s.modSeenAt < MOD_ALIVE_MS;
+  }
+
+  // Queue `from`'s plan for `to`; its module submits it as a prompt there.
+  sendPlan(fromId, toId) {
+    const from = this.sessions.get(fromId);
+    const to = this.sessions.get(toId);
+    if (!from?.plan || !to || fromId === toId || !this.canReceive(to)) return false;
+    this.outbox.set(toId, { text: planPrompt(from), fromId, at: Date.now() });
+    from.plan.sent = { to: toId, toName: to.title || to.name, status: 'queued', at: Date.now() };
+    this._changed();
+    return true;
+  }
+
+  // ---- background builders (builder.js; started by the app) ----
+
+  planPromptFor(plannerId) {
+    const s = this.sessions.get(plannerId);
+    return s?.plan ? planPrompt(s) : null;
+  }
+
+  // Builds that are starting or running, everywhere.
+  runningBuilds() {
+    return [...this.sessions.values()].filter((s) => ['starting', 'running'].includes(s.plan?.build?.status)).length;
+  }
+
+  buildStarting(plannerId) {
+    const s = this.sessions.get(plannerId);
+    if (!s?.plan) return false;
+    s.plan.build = { status: 'starting', at: Date.now(), bgId: null, sessionId: null, report: null, reason: '' };
+    this._changed();
+    return true;
+  }
+
+  buildLaunched(plannerId, { bgId, sessionId }) {
+    const b = this.sessions.get(plannerId)?.plan?.build;
+    if (!b || !['starting', 'running'].includes(b.status)) return;
+    Object.assign(b, { status: 'running', bgId: bgId || b.bgId, sessionId: sessionId || b.sessionId });
+    if (b.sessionId) {
+      this.builders.set(b.sessionId, plannerId);
+      const builder = this.sessions.get(b.sessionId);
+      if (builder && !builder.builderOf) {
+        builder.builderOf = plannerId;
+        builder.title = builderName(this.sessions.get(plannerId).plan.title);
+      }
+      // Linked after the fact: the builder may already be done, or gone.
+      if (builder?.state === 'done') {
+        const last = [...builder.steps].reverse().find((st) => st.kind === 'message');
+        this._builderDone(builder, last?.title || '');
+      } else if (!builder && this.dismissed.has(b.sessionId)) {
+        b.status = 'stopped';
+      }
+    }
+    this._changed();
+  }
+
+  // The builder's first prompt names its plan: link it at once, without
+  // waiting for `claude agents` (which only answers a few seconds later).
+  _linkByPrompt(s, prompt) {
+    if (this.builders.has(s.id) || !isBuilderPrompt(prompt)) return;
+    for (const planner of this.sessions.values()) {
+      const b = planner.plan?.build;
+      if (!b || b.sessionId || !['starting', 'running'].includes(b.status)) continue;
+      const p = planner.plan;
+      if ((p.path && prompt.includes(p.path)) || (!p.path && p.text && prompt.includes(p.text.slice(0, 200)))) {
+        this.buildLaunched(planner.id, { sessionId: s.id });
+        return;
+      }
+    }
+  }
+
+  buildFailed(plannerId, reason) {
+    const b = this.sessions.get(plannerId)?.plan?.build;
+    if (!b) return;
+    Object.assign(b, { status: 'failed', reason: clip(reason || 'Could not start', 300) });
+    this._changed();
+  }
+
+  buildStopped(plannerId) {
+    const b = this.sessions.get(plannerId)?.plan?.build;
+    if (!b || !['starting', 'running'].includes(b.status)) return;
+    b.status = 'stopped';
+    this._changed();
+  }
+
+  // The builder finished its work: tell its planner, through the planner's module.
+  _builderDone(builder, message) {
+    const planner = this.sessions.get(this.builders.get(builder.id));
+    const b = planner?.plan?.build;
+    if (!b || b.status === 'done') return;
+    b.status = 'done';
+    b.message = clip(message || '', 1500);
+    if (this.canReceive(planner)) {
+      this.outbox.set(planner.id, { text: reportPrompt(planner.plan.title, message), fromId: builder.id });
+      b.report = 'queued';
+    } else {
+      b.report = 'unavailable'; // the planner has no plugin module: the report is on the builder's card
+    }
+  }
+
+  // Give up on deliveries nobody is coming for: the receiving session's module
+  // stopped asking (the session closed, or a background session finished and
+  // exited). Called from the app's 10-second tick.
+  expireOutbox() {
+    let changed = false;
+    for (const [toId, msg] of [...this.outbox]) {
+      const to = this.sessions.get(toId);
+      if (to && this.canReceive(to)) continue;
+      this.outbox.delete(toId);
+      for (const s of this.sessions.values()) {
+        const sent = s.plan?.sent;
+        if (sent && sent.to === toId && s.id === msg.fromId && sent.status === 'queued') {
+          sent.status = 'failed';
+          changed = true;
+        }
+        const b = s.plan?.build;
+        if (b && s.id === toId && b.report === 'queued') {
+          b.report = 'unavailable'; // the report stays on the builder's card
+          changed = true;
+        }
+      }
+    }
+    if (changed) this._changed();
+  }
+
+  // Take back a plan not yet collected.
+  cancelPlan(fromId) {
+    const from = this.sessions.get(fromId);
+    const sent = from?.plan?.sent;
+    if (!sent) return;
+    const msg = this.outbox.get(sent.to);
+    if (msg && msg.fromId === fromId) this.outbox.delete(sent.to);
+    from.plan.sent = null;
+    this._changed();
+  }
+
+  // The module of `session_id` asks for its inbox ('wait' mode: the reply carries it).
+  _inbox(evt) {
+    const s = this.sessions.get(evt.session_id);
+    if (s) {
+      const wasAlive = this.canReceive(s);
+      s.modSeenAt = Date.now();
+      if (!wasAlive) this._changed();
+    }
+    const msg = this.outbox.get(evt.session_id);
+    if (!msg) return null;
+    this.outbox.delete(evt.session_id);
+    const from = this.sessions.get(msg.fromId);
+    if (from?.plan?.sent?.to === evt.session_id) {
+      from.plan.sent.status = 'collected';
+      this._changed();
+    }
+    return { promise: Promise.resolve({ huddle: { submit: msg.text, fromId: msg.fromId } }), cancel() {} };
+  }
+
+  // The module reports how the submit went: a plan it was sent, or a builder's report.
+  _delivered(evt) {
+    for (const s of this.sessions.values()) {
+      const sent = s.plan?.sent;
+      if (sent && sent.to === evt.session_id && s.id === evt.from_id) {
+        sent.status = evt.ok === false ? 'failed' : 'delivered';
+        sent.at = Date.now();
+        this._changed();
+      }
+      const b = s.plan?.build;
+      if (b && s.id === evt.session_id && b.sessionId === evt.from_id) {
+        b.report = evt.ok === false ? 'failed' : 'delivered';
+        this._changed();
+      }
+    }
+  }
+
+  // After its plan, does this step carry the plan out? A file the main agent
+  // changes that is not the plan, or a subagent started to build or fix.
+  _carriesOut(s, tool, input, evt) {
+    if (FILE_TOOLS.has(tool) && !evt.agent_id) {
+      const p = String(input.file_path || '');
+      return !!p && p !== s.plan.path && !isPlanFile(p);
+    }
+    if (AGENT_TOOLS.has(tool) && !evt.agent_id) return team.family(input.description, input.subagent_type) === 'implement';
+    return false;
+  }
+
+  // kind: 'folder' (a plans folder, as superpowers saves them), 'mode' (plan
+  // mode) or 'name' (only the file name says plan). Only a 'folder' plan may
+  // start a builder by itself; the others wait for a click (plan mode goes on
+  // to carry out its plan in the same session).
+  _setPlan(s, { path, text }) {
+    const title = path ? planTitle(path) : clip(String(text || '').split('\n').find((l) => l.trim()) || 'plan', 40).replace(/^#+\s*/, '');
+    const kind = !path ? 'mode' : /(^|[\\/])plans?[\\/][^\\/]+$/i.test(path) ? 'folder' : 'name';
+    s.plan = { path: path || '', text: path ? '' : clip(text, 6000), title, kind, at: Date.now(), sent: null, build: null };
+  }
+
+  // Tell a planner (through its module) that a builder took its plan, so it
+  // does not start carrying it out as well.
+  noticeBuilding(plannerId, name) {
+    const s = this.sessions.get(plannerId);
+    if (!this.canReceive(s) || this.outbox.has(plannerId)) return false;
+    this.outbox.set(plannerId, {
+      text: `Agent Huddle started a background session ("${name}") to carry out the plan "${s.plan.title}". Do not carry it out here; its report will come to this session when it is done.`,
+      fromId: plannerId,
+    });
+    return true;
+  }
+
   // Release every waiting hook (app is quitting).
   releaseAll() {
     for (const id of [...this.waiters.keys()]) this._settle(id, null, 'attention');
   }
 
   // ---- internals ----
+
+  // ---- the team: one entry per subagent ----
+  //
+  // A subagent is reported by four events that may arrive in any order (the
+  // hooks run in the background): the Agent call (PreToolUse: what it is for,
+  // keyed by tool_use_id), its result (PostToolUse: agentId, resolvedModel),
+  // SubagentStart and SubagentStop (agent_id = agentId). Each event joins the
+  // entry the others made, and only makes one when there is none to join.
+
+  _teamAdd(s, fields) {
+    const a = {
+      key: null, // tool_use_id of the Agent call
+      id: null, // agent id
+      type: '',
+      description: '',
+      model: '',
+      status: 'running', // 'running' | 'done' | 'failed'
+      verdict: null, // 'pass' | 'fail' | 'warn' | null
+      summary: '',
+      message: '',
+      startedAt: Date.now(),
+      endedAt: null,
+      ...fields,
+    };
+    // The task it belongs to, for counting rounds of the same step.
+    a.task = s.progress && s.progress.done < s.progress.total ? s.progress.label : '';
+    this._teamName(s, a);
+    s.team.push(a);
+    if (s.team.length > MAX_TEAM) s.team.splice(0, s.team.length - MAX_TEAM);
+    return a;
+  }
+
+  // Label, family and round, from what is known so far.
+  _teamName(s, a) {
+    a.label = team.label(a.description, a.type);
+    a.family = team.family(a.description, a.type);
+    a.round =
+      a.family === 'other'
+        ? 1
+        : 1 + s.team.filter((x) => x !== a && x.family === a.family && x.task === a.task && x.startedAt <= a.startedAt).length;
+  }
+
+  // The newest running entry still missing `field`, of this type when known.
+  _teamUnclaimed(s, field, type) {
+    for (let i = s.team.length - 1; i >= 0; i--) {
+      const x = s.team[i];
+      if (x.status === 'running' && !x[field] && (!type || !x.type || x.type === type)) return x;
+    }
+    return null;
+  }
+
+  _teamCall(s, evt) {
+    const input = evt.tool_input || {};
+    const key = evt.tool_use_id || null;
+    let a = (key && s.team.find((x) => x.key === key)) || this._teamUnclaimed(s, 'key', input.subagent_type);
+    if (!a) a = this._teamAdd(s, { key, description: input.description || '', type: input.subagent_type || '' });
+    a.key = a.key || key;
+    if (!a.description && input.description) {
+      a.description = input.description;
+      if (!a.type) a.type = input.subagent_type || '';
+      this._teamName(s, a);
+    }
+    if (input.model && !a.model) a.model = team.shortModel(input.model);
+  }
+
+  _teamCalled(s, evt, failed) {
+    const r = evt.tool_response && typeof evt.tool_response === 'object' ? evt.tool_response : {};
+    this._teamCall(s, evt);
+    const a = s.team.find((x) => x.key === evt.tool_use_id) || s.team.at(-1);
+    if (!a) return;
+    if (r.agentId) {
+      // SubagentStart/Stop may have made an entry of their own first: fold it in.
+      const early = s.team.find((x) => x !== a && x.id === r.agentId);
+      if (early) {
+        if (early.status !== 'running') Object.assign(a, { status: early.status, verdict: early.verdict, summary: early.summary, message: early.message, endedAt: early.endedAt });
+        s.team.splice(s.team.indexOf(early), 1);
+      }
+      a.id = r.agentId;
+    }
+    if (r.resolvedModel) a.model = team.shortModel(r.resolvedModel);
+    if (failed && a.status === 'running') Object.assign(a, { status: 'failed', verdict: 'fail', endedAt: Date.now() });
+  }
+
+  _teamStart(s, evt) {
+    const id = evt.agent_id;
+    if (!id || s.team.some((x) => x.id === id)) return;
+    const a = this._teamUnclaimed(s, 'id', evt.agent_type);
+    if (a) {
+      a.id = id;
+      if (!a.type) a.type = evt.agent_type || '';
+    } else this._teamAdd(s, { id, type: evt.agent_type || '' });
+  }
+
+  _teamStop(s, evt) {
+    const id = evt.agent_id;
+    let a = (id && s.team.find((x) => x.id === id)) || this._teamUnclaimed(s, 'id', evt.agent_type);
+    if (!a) a = this._teamAdd(s, { id, type: evt.agent_type || '' });
+    a.id = a.id || id || null;
+    const text = String(evt.last_assistant_message || '');
+    Object.assign(a, {
+      status: 'done',
+      verdict: team.verdict(text),
+      summary: team.summary(text),
+      message: clip(text, 1500),
+      endedAt: Date.now(),
+    });
+  }
 
   // A statusLine report. It only updates numbers: it never creates or revives a
   // card, and its parent pid is a shell, not Claude Code, so it is not used to
@@ -326,6 +704,13 @@ class Store extends EventEmitter {
   // the background and can land late) must not bring its card back.
   _end(id) {
     this._cancelAll(id);
+    // A builder that ends before it finished: its planner's card says so.
+    const plannerId = this.builders.get(id);
+    if (plannerId) this.buildStopped(plannerId);
+    // Forget the links and deliveries of a session that is gone.
+    this.builders.delete(id);
+    for (const [builderId, pid] of [...this.builders]) if (pid === id) this.builders.delete(builderId);
+    this.outbox.delete(id);
     if (this.dismissed.size > 500) this.dismissed.clear();
     this.dismissed.add(id);
     if (this.sessions.delete(id)) this._changed();
@@ -358,6 +743,9 @@ class Store extends EventEmitter {
         pending: [],
         tasks: [],
         progress: null, // { done, total, label } when the agent keeps a task list
+        team: [], // subagents of the current piece of work, see team.js
+        plan: null, // { path?, text?, title, at, sent?: { to, toName, status, at } }
+        modSeenAt: 0, // last time this session's plugin module asked for its inbox
         startedAt: Date.now(),
         updatedAt: Date.now(),
       };
@@ -490,6 +878,17 @@ function systemNotice(prompt) {
   const status = tag('status');
   if (summary) return clip(`Background task: ${summary}`, 200);
   return status ? `Background task ${status}` : 'Background task update';
+}
+
+// What the receiving session is asked. Worded so that a session with
+// superpowers picks up its plan-execution skills by itself.
+function planPrompt(from) {
+  const who = from.title || from.name;
+  const p = from.plan;
+  if (p.path) {
+    return `Here is an implementation plan written in another session (${who}): ${p.path}\n\nRead it and carry it out task by task, checking your work as you go.`;
+  }
+  return `Here is an implementation plan written in another session (${who}):\n\n${p.text}\n\nCarry it out task by task, checking your work as you go.`;
 }
 
 function signature(tool, input) {

@@ -1,11 +1,13 @@
 {
   "name": "agent-huddle",
   "displayName": "Agent Huddle",
-  "version": "0.1.0",
-  "description": "A small always-on-top box with one buddy per Claude Code session: what each agent is doing, risk-labelled permission prompts you can answer in place, and your quota at a glance. Windows.",
+  "version": "0.2.0",
+  "description": "A small always-on-top box with one buddy per Claude Code session: what each agent and its subagents are doing, risk-labelled permission prompts you can answer in place, your quota at a glance, and plans built in the background. Windows.",
   "author": {
     "name": "Jepsterrr"
   },
+  "homepage": "https://github.com/Jepsterrr/agent-huddle",
+  "repository": "https://github.com/Jepsterrr/agent-huddle",
   "license": "MIT",
-  "keywords": ["sessions", "permissions", "dashboard", "windows", "electron", "quota"]
+  "keywords": ["sessions", "permissions", "subagents", "dashboard", "windows", "electron", "quota", "superpowers"]
 }

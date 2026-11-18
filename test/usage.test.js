@@ -58,6 +58,10 @@ test('StatusLine updates numbers only: no new card, no revive, no pid', () => {
   store.dismiss('s1');
   store.handle(status({ cost_usd: 3 }), 'status');
   assert.equal(store.snapshot().length, 0);
+
+  // The plugin module sends it as a plain event: the same handling, by name.
+  store.handle(status({ cost_usd: 4 }), 'notify', { ppid: 999 });
+  assert.equal(store.snapshot().length, 0);
 });
 
 // ---- the hook script in status mode ----
